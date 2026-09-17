@@ -9,15 +9,38 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 #include "Target.hxx"
 
 namespace embdevenv {
+
+struct ConsoleConfig {
+    std::string name;
+    std::string port;
+    int baudRate = 115200;
+    int telnetPort = 0;
+    size_t lineBufferCapacity = 10000;
+};
+
+struct McuConfig {
+    std::string port;
+    int baudRate = 115200;
+    std::string prompt = "#";
+    int telnetPort = 0;
+    int pollIntervalMs = 2000;
+};
 
 struct TargetConfig {
     std::string name;
     std::string model;
     std::string description;
     bool enabled = true;
+
+    // Multi-console & MCU configuration
+    std::vector<ConsoleConfig> consoles;
+    McuConfig mcu;
+
+    // Backwards-compatible flat fields
     int telnetPort = 0;
     std::string consolePort;
     int consoleBaudRate = 115200;

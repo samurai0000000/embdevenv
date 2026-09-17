@@ -14,14 +14,13 @@
 #include <atomic>
 #include <mutex>
 #include <netinet/in.h>
+#include "TelnetBackend.hxx"
 
 namespace embdevenv {
 
-class Console;
-
 class TelnetSession {
 public:
-    TelnetSession(int clientFd, struct sockaddr_in addr, Console *console);
+    TelnetSession(int clientFd, struct sockaddr_in addr, ITelnetBackend *backend);
     ~TelnetSession();
 
     bool start();
@@ -38,7 +37,7 @@ private:
 
     int _clientFd;
     struct sockaddr_in _addr;
-    Console *_console;
+    ITelnetBackend *_backend;
     std::atomic<bool> _running;
     std::thread _workerThread;
     mutable std::mutex _writeMutex;
@@ -46,7 +45,7 @@ private:
 
 class TelnetServer {
 public:
-    TelnetServer(int port, Console *console);
+    TelnetServer(int port, ITelnetBackend *backend);
     ~TelnetServer();
 
     bool start();
@@ -62,9 +61,9 @@ private:
     void pruneDisconnectedSessions();
 
     int _port;
-    Console *_console;
+    ITelnetBackend *_backend;
     int _listenFd;
-    int _consoleListenerId;
+    int _listenerId;
 
     std::atomic<bool> _running;
     std::thread _acceptThread;

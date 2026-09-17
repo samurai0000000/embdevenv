@@ -45,7 +45,7 @@ bool SerialPort::open()
 
 bool SerialPort::open(const std::string &device, int baudRate)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::scoped_lock lock(_lifecycleMutex, _readMutex, _writeMutex);
 
     if (_fd >= 0) {
         ::close(_fd);
@@ -94,7 +94,7 @@ bool SerialPort::open(const std::string &device, int baudRate)
 
 void SerialPort::close()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::scoped_lock lock(_lifecycleMutex, _readMutex, _writeMutex);
     if (_fd >= 0) {
         ::close(_fd);
         _fd = -1;
@@ -104,7 +104,7 @@ void SerialPort::close()
 
 bool SerialPort::isOpen() const
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    std::lock_guard<std::mutex> lock(_lifecycleMutex);
     return _fd >= 0;
 }
 
@@ -183,13 +183,17 @@ bool SerialPort::configureTermios()
 
 ssize_t SerialPort::read(char *buf, size_t maxLen, int timeoutMs)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_fd < 0 || buf == nullptr || maxLen == 0) {
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> lock(_lifecycleMutex);
+        fd = _fd;
+    }
+    if (fd < 0 || buf == nullptr || maxLen == 0) {
         return -1;
     }
 
     struct pollfd pfd;
-    pfd.fd = _fd;
+    pfd.fd = fd;
     pfd.events = POLLIN;
     pfd.revents = 0;
 
@@ -206,7 +210,8 @@ ssize_t SerialPort::read(char *buf, size_t maxLen, int timeoutMs)
     }
 
     if (pfd.revents & POLLIN) {
-        return ::read(_fd, buf, maxLen);
+        std::lock_guard<std::mutex> lock(_readMutex);
+        return ::read(fd, buf, maxLen);
     }
 
     return 0;
@@ -214,8 +219,13 @@ ssize_t SerialPort::read(char *buf, size_t maxLen, int timeoutMs)
 
 bool SerialPort::readLine(std::string &line, int timeoutMs)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_fd < 0) {
+    std::lock_guard<std::mutex> rlock(_readMutex);
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> lock(_lifecycleMutex);
+        fd = _fd;
+    }
+    if (fd < 0) {
         return false;
     }
 
@@ -236,13 +246,13 @@ bool SerialPort::readLine(std::string &line, int timeoutMs)
 
     while (remainingTimeout >= 0) {
         struct pollfd pfd;
-        pfd.fd = _fd;
+        pfd.fd = fd;
         pfd.events = POLLIN;
         pfd.revents = 0;
 
         int ret = poll(&pfd, 1, (remainingTimeout < stepMs) ? remainingTimeout : stepMs);
         if (ret > 0 && (pfd.revents & POLLIN)) {
-            ssize_t n = ::read(_fd, buf, sizeof(buf) - 1);
+            ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
             if (n > 0) {
                 buf[n] = '\0';
                 _readRemainder.append(buf, n);
@@ -271,15 +281,20 @@ bool SerialPort::readLine(std::string &line, int timeoutMs)
 
 ssize_t SerialPort::write(const char *data, size_t len)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_fd < 0 || data == nullptr || len == 0) {
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> lock(_lifecycleMutex);
+        fd = _fd;
+    }
+    if (fd < 0 || data == nullptr || len == 0) {
         return -1;
     }
 
+    std::lock_guard<std::mutex> lock(_writeMutex);
     size_t totalWritten = 0;
     while (totalWritten < len) {
         struct pollfd pfd;
-        pfd.fd = _fd;
+        pfd.fd = fd;
         pfd.events = POLLOUT;
         pfd.revents = 0;
 
@@ -288,7 +303,7 @@ ssize_t SerialPort::write(const char *data, size_t len)
             return totalWritten > 0 ? (ssize_t)totalWritten : -1;
         }
 
-        ssize_t n = ::write(_fd, data + totalWritten, len - totalWritten);
+        ssize_t n = ::write(fd, data + totalWritten, len - totalWritten);
         if (n > 0) {
             totalWritten += n;
         } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -306,10 +321,15 @@ ssize_t SerialPort::write(const std::string &str)
 
 void SerialPort::flush()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_fd >= 0) {
-        tcflush(_fd, TCIOFLUSH);
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> lock(_lifecycleMutex);
+        fd = _fd;
     }
+    if (fd >= 0) {
+        tcflush(fd, TCIOFLUSH);
+    }
+    std::scoped_lock lock(_readMutex, _writeMutex);
     _readRemainder.clear();
 }
 

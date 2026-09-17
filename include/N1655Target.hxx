@@ -9,11 +9,13 @@
 
 #include "Target.hxx"
 #include "N1655Mcu.hxx"
+#include "TargetFactory.hxx"
 
 namespace embdevenv {
 
 class N1655Target : public Target {
 public:
+    explicit N1655Target(const TargetConfig &config);
     N1655Target(const std::string &name,
                 const std::string &model,
                 const std::string &description,

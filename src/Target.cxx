@@ -41,19 +41,24 @@ bool Target::start()
 
     _running = true;
 
-    if (_console != nullptr) {
-        _console->start();
+    for (auto &c : _consoles) {
+        if (c != nullptr) {
+            c->start();
+        }
     }
 
     if (_mcu != nullptr) {
         _mcu->start();
     }
 
-    if (_telnetServer != nullptr) {
-        _telnetServer->start();
+    for (auto &ts : _telnetServers) {
+        if (ts != nullptr) {
+            ts->start();
+        }
     }
 
-    fprintf(stderr, "[embdevenv] Started target '%s' (%s)\n", _name.c_str(), _model.c_str());
+    fprintf(stderr, "[embdevenv] Started target '%s' (%s) with %zu console(s) and %zu telnet server(s)\n",
+            _name.c_str(), _model.c_str(), _consoles.size(), _telnetServers.size());
     return true;
 }
 
@@ -65,16 +70,20 @@ void Target::stop()
 
     _running = false;
 
-    if (_telnetServer != nullptr) {
-        _telnetServer->stop();
+    for (auto &ts : _telnetServers) {
+        if (ts != nullptr) {
+            ts->stop();
+        }
     }
 
     if (_mcu != nullptr) {
         _mcu->stop();
     }
 
-    if (_console != nullptr) {
-        _console->stop();
+    for (auto &c : _consoles) {
+        if (c != nullptr) {
+            c->stop();
+        }
     }
 
     fprintf(stderr, "[embdevenv] Stopped target '%s'\n", _name.c_str());
@@ -110,9 +119,39 @@ int Target::getTelnetPort() const
     return _telnetPort;
 }
 
-std::shared_ptr<Console> Target::getConsole() const
+void Target::addConsole(std::shared_ptr<Console> console)
 {
-    return _console;
+    if (console != nullptr) {
+        _consoles.push_back(console);
+    }
+}
+
+const std::vector<std::shared_ptr<Console>> &Target::getConsoles() const
+{
+    return _consoles;
+}
+
+std::shared_ptr<Console> Target::getConsole(size_t index) const
+{
+    if (index < _consoles.size()) {
+        return _consoles[index];
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Console> Target::getConsoleByName(const std::string &name) const
+{
+    for (const auto &c : _consoles) {
+        if (c && c->getName() == name) {
+            return c;
+        }
+    }
+    return nullptr;
+}
+
+void Target::setMcu(std::shared_ptr<Mcu> mcu)
+{
+    _mcu = mcu;
 }
 
 std::shared_ptr<Mcu> Target::getMcu() const
@@ -120,9 +159,24 @@ std::shared_ptr<Mcu> Target::getMcu() const
     return _mcu;
 }
 
+void Target::addTelnetServer(std::shared_ptr<TelnetServer> telnetServer)
+{
+    if (telnetServer != nullptr) {
+        _telnetServers.push_back(telnetServer);
+    }
+}
+
+const std::vector<std::shared_ptr<TelnetServer>> &Target::getTelnetServers() const
+{
+    return _telnetServers;
+}
+
 std::shared_ptr<TelnetServer> Target::getTelnetServer() const
 {
-    return _telnetServer;
+    if (!_telnetServers.empty()) {
+        return _telnetServers[0];
+    }
+    return nullptr;
 }
 
 nlohmann::json Target::getStatusJson() const
@@ -135,11 +189,27 @@ nlohmann::json Target::getStatusJson() const
     j["running"] = _running;
     j["telnetPort"] = _telnetPort;
 
-    if (_console != nullptr) {
+    nlohmann::json consolesJson = nlohmann::json::array();
+    for (const auto &c : _consoles) {
+        if (c) {
+            nlohmann::json cj;
+            cj["name"] = c->getName();
+            cj["port"] = c->getPort();
+            cj["baudRate"] = c->getBaudRate();
+            cj["telnetPort"] = c->getTelnetPort();
+            cj["connected"] = c->isConnected();
+            consolesJson.push_back(cj);
+        }
+    }
+    j["consoles"] = consolesJson;
+
+    if (!_consoles.empty() && _consoles[0] != nullptr) {
         nlohmann::json c;
-        c["port"] = _console->getPort();
-        c["baudRate"] = _console->getBaudRate();
-        c["connected"] = _console->isConnected();
+        c["name"] = _consoles[0]->getName();
+        c["port"] = _consoles[0]->getPort();
+        c["baudRate"] = _consoles[0]->getBaudRate();
+        c["telnetPort"] = _consoles[0]->getTelnetPort();
+        c["connected"] = _consoles[0]->isConnected();
         j["console"] = c;
     } else {
         j["console"] = nullptr;
@@ -151,11 +221,23 @@ nlohmann::json Target::getStatusJson() const
         j["mcu"] = nullptr;
     }
 
-    if (_telnetServer != nullptr) {
+    nlohmann::json telnetsJson = nlohmann::json::array();
+    for (const auto &ts : _telnetServers) {
+        if (ts) {
+            nlohmann::json tj;
+            tj["port"] = ts->getPort();
+            tj["activeSessions"] = ts->getActiveSessionCount();
+            tj["running"] = ts->isRunning();
+            telnetsJson.push_back(tj);
+        }
+    }
+    j["telnetServers"] = telnetsJson;
+
+    if (!_telnetServers.empty() && _telnetServers[0] != nullptr) {
         nlohmann::json t;
-        t["port"] = _telnetServer->getPort();
-        t["activeSessions"] = _telnetServer->getActiveSessionCount();
-        t["running"] = _telnetServer->isRunning();
+        t["port"] = _telnetServers[0]->getPort();
+        t["activeSessions"] = _telnetServers[0]->getActiveSessionCount();
+        t["running"] = _telnetServers[0]->isRunning();
         j["telnet"] = t;
     } else {
         j["telnet"] = nullptr;

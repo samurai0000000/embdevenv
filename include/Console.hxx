@@ -16,38 +16,43 @@
 #include <memory>
 #include "SerialPort.hxx"
 #include "RingBuffer.hxx"
+#include "TelnetBackend.hxx"
 
 namespace embdevenv {
 
-class Console {
+class Console : public ITelnetBackend {
 public:
-    using OutputCallback = std::function<void(const char *data, size_t len)>;
-
+    Console(const std::string &name, const std::string &port, int baudRate = 115200,
+            size_t lineBufferCapacity = 10000, int telnetPort = 0);
     Console(const std::string &port, int baudRate = 115200, size_t lineBufferCapacity = 10000);
-    ~Console();
+    ~Console() override;
 
     bool start();
     void stop();
     bool isRunning() const;
     bool isConnected() const;
 
-    ssize_t write(const char *data, size_t len);
-    ssize_t write(const std::string &data);
+    ssize_t write(const char *data, size_t len) override;
+    ssize_t write(const std::string &data) override;
 
     std::vector<std::string> getRecentLines(size_t count = 100) const;
     void clearBuffer();
 
-    int addListener(OutputCallback callback);
-    void removeListener(int listenerId);
+    int addListener(OutputCallback callback) override;
+    void removeListener(int listenerId) override;
 
+    const std::string &getName() const;
     const std::string &getPort() const;
     int getBaudRate() const;
+    int getTelnetPort() const;
 
 private:
     void readWorker();
 
+    std::string _name;
     std::string _port;
     int _baudRate;
+    int _telnetPort;
     SerialPort _serial;
 
     std::atomic<bool> _running;
@@ -56,6 +61,7 @@ private:
 
     RingBuffer<std::string> _lineBuffer;
     std::string _partialLine;
+    bool _lastCharWasCr;
     mutable std::mutex _lineMutex;
 
     mutable std::mutex _listenersMutex;

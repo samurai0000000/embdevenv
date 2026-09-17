@@ -48,7 +48,9 @@ private:
     std::string _device;
     int _baudRate;
     int _fd;
-    mutable std::mutex _mutex;
+    mutable std::mutex _lifecycleMutex;
+    mutable std::mutex _readMutex;
+    mutable std::mutex _writeMutex;
     std::string _readRemainder;
     int _lastOpenError;
     uint64_t _lastOpenLogMs;

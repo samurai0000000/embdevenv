@@ -26,10 +26,10 @@ static constexpr unsigned char WILL = 251;
 static constexpr unsigned char SB   = 250;
 static constexpr unsigned char SE   = 240;
 
-TelnetSession::TelnetSession(int clientFd, struct sockaddr_in addr, Console *console)
+TelnetSession::TelnetSession(int clientFd, struct sockaddr_in addr, ITelnetBackend *backend)
     : _clientFd(clientFd)
     , _addr(addr)
-    , _console(console)
+    , _backend(backend)
     , _running(false)
 {
 }
@@ -62,10 +62,6 @@ bool TelnetSession::start()
 
 void TelnetSession::stop()
 {
-    if (!_running) {
-        return;
-    }
-
     _running = false;
     if (_clientFd >= 0) {
         ::shutdown(_clientFd, SHUT_RDWR);
@@ -74,7 +70,11 @@ void TelnetSession::stop()
     }
 
     if (_workerThread.joinable()) {
-        _workerThread.join();
+        if (_workerThread.get_id() != std::this_thread::get_id()) {
+            _workerThread.join();
+        } else {
+            _workerThread.detach();
+        }
     }
 }
 
@@ -125,7 +125,7 @@ int TelnetSession::getClientPort() const
 
 void TelnetSession::processIncomingBytes(const char *buf, size_t len)
 {
-    if (_console == nullptr || buf == nullptr || len == 0) {
+    if (_backend == nullptr || buf == nullptr || len == 0) {
         return;
     }
 
@@ -172,7 +172,7 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
     }
 
     if (!cleanData.empty()) {
-        _console->write(cleanData);
+        _backend->write(cleanData);
     }
 }
 
@@ -205,11 +205,11 @@ void TelnetSession::sessionWorker()
     _running = false;
 }
 
-TelnetServer::TelnetServer(int port, Console *console)
+TelnetServer::TelnetServer(int port, ITelnetBackend *backend)
     : _port(port)
-    , _console(console)
+    , _backend(backend)
     , _listenFd(-1)
-    , _consoleListenerId(-1)
+    , _listenerId(-1)
     , _running(false)
 {
 }
@@ -262,9 +262,9 @@ bool TelnetServer::start()
 
     _running = true;
 
-    // Register callback with Console to receive output
-    if (_console != nullptr) {
-        _consoleListenerId = _console->addListener(
+    // Register callback with backend to receive output
+    if (_backend != nullptr) {
+        _listenerId = _backend->addListener(
             [this](const char *data, size_t len) {
                 broadcastConsoleOutput(data, len);
             });
@@ -283,9 +283,9 @@ void TelnetServer::stop()
 
     _running = false;
 
-    if (_console != nullptr && _consoleListenerId >= 0) {
-        _console->removeListener(_consoleListenerId);
-        _consoleListenerId = -1;
+    if (_backend != nullptr && _listenerId >= 0) {
+        _backend->removeListener(_listenerId);
+        _listenerId = -1;
     }
 
     if (_listenFd >= 0) {
@@ -333,12 +333,16 @@ void TelnetServer::broadcastConsoleOutput(const char *data, size_t len)
 void TelnetServer::pruneDisconnectedSessions()
 {
     std::lock_guard<std::mutex> lock(_sessionsMutex);
-    _sessions.erase(
-        std::remove_if(_sessions.begin(), _sessions.end(),
-                       [](const std::shared_ptr<TelnetSession> &s) {
-                           return !s->isRunning();
-                       }),
-        _sessions.end());
+    for (auto it = _sessions.begin(); it != _sessions.end(); ) {
+        if (!(*it)->isRunning()) {
+            if (_backend != nullptr) {
+                _backend->onClientDisconnect();
+            }
+            it = _sessions.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void TelnetServer::acceptWorker()
@@ -356,8 +360,11 @@ void TelnetServer::acceptWorker()
             int clientFd = ::accept(_listenFd, reinterpret_cast<struct sockaddr *>(&clientAddr),
                                     &clientLen);
             if (clientFd >= 0) {
-                auto session = std::make_shared<TelnetSession>(clientFd, clientAddr, _console);
+                auto session = std::make_shared<TelnetSession>(clientFd, clientAddr, _backend);
                 if (session->start()) {
+                    if (_backend != nullptr) {
+                        _backend->onClientConnect();
+                    }
                     std::lock_guard<std::mutex> lock(_sessionsMutex);
                     _sessions.push_back(session);
                     fprintf(stderr, "[embdevenv] Telnet client connected from %s:%d (port %d)\n",

@@ -35,32 +35,8 @@ Config::Config()
     _mcpConfig.standalonePort = 3889;
     _mcpConfig.reconnectIntervalSec = 5;
 
-    // Default Targets
-    TargetConfig pro;
-    pro.name = "n1-655-pro";
-    pro.model = "n1-655-pro";
-    pro.description = "N1-655 Production Board";
-    pro.enabled = true;
-    pro.telnetPort = 3887;
-    pro.consolePort = "/dev/ttyCH9344USB0";
-    pro.consoleBaudRate = 115200;
-    pro.mcuPort = "/dev/ttyCH9344USB3";
-    pro.mcuBaudRate = 115200;
-    pro.mcuPollIntervalMs = 2000;
-    _targets.push_back(pro);
-
-    TargetConfig devkit;
-    devkit.name = "n1-655-devkit";
-    devkit.model = "n1-655-devkit";
-    devkit.description = "N1-655 Development Kit";
-    devkit.enabled = true;
-    devkit.telnetPort = 3888;
-    devkit.consolePort = "/dev/ttyCH9344USB8";
-    devkit.consoleBaudRate = 115200;
-    devkit.mcuPort = "/dev/ttyCH9344USB11";
-    devkit.mcuBaudRate = 115200;
-    devkit.mcuPollIntervalMs = 2000;
-    _targets.push_back(devkit);
+    // No hardcoded targets: targets are loaded dynamically from config file
+    _targets.clear();
 }
 
 std::string Config::resolveHomePath(const std::string &path)
@@ -187,9 +163,48 @@ bool Config::load(const std::string &customPath)
                     t.lookupValue("model", tc.model);
                     t.lookupValue("description", tc.description);
                     t.lookupValue("enabled", tc.enabled);
+
+                    // Consoles list
+                    if (t.exists("consoles")) {
+                        const libconfig::Setting &consolesSetting = t.lookup("consoles");
+                        int cCount = consolesSetting.getLength();
+                        for (int c = 0; c < cCount; ++c) {
+                            const libconfig::Setting &cs = consolesSetting[c];
+                            ConsoleConfig cc;
+                            cs.lookupValue("name", cc.name);
+                            if (!cs.lookupValue("device", cc.port)) {
+                                cs.lookupValue("port", cc.port);
+                            }
+                            cs.lookupValue("baud_rate", cc.baudRate);
+                            cs.lookupValue("telnet_port", cc.telnetPort);
+                            int bufLines = 10000;
+                            if (cs.lookupValue("buffer_lines", bufLines)) {
+                                cc.lineBufferCapacity = static_cast<size_t>(bufLines);
+                            }
+                            if (!cc.name.empty() || !cc.port.empty()) {
+                                tc.consoles.push_back(cc);
+                            }
+                        }
+                    }
+
+                    // Legacy flat console fields
                     t.lookupValue("telnet_port", tc.telnetPort);
                     t.lookupValue("console_port", tc.consolePort);
                     t.lookupValue("console_baud_rate", tc.consoleBaudRate);
+
+                    // MCU group
+                    if (t.exists("mcu")) {
+                        const libconfig::Setting &mcuSetting = t.lookup("mcu");
+                        if (!mcuSetting.lookupValue("device", tc.mcu.port)) {
+                            mcuSetting.lookupValue("port", tc.mcu.port);
+                        }
+                        mcuSetting.lookupValue("baud_rate", tc.mcu.baudRate);
+                        mcuSetting.lookupValue("prompt", tc.mcu.prompt);
+                        mcuSetting.lookupValue("telnet_port", tc.mcu.telnetPort);
+                        mcuSetting.lookupValue("poll_interval_ms", tc.mcu.pollIntervalMs);
+                    }
+
+                    // Legacy flat mcu fields
                     t.lookupValue("mcu_port", tc.mcuPort);
                     t.lookupValue("mcu_baud_rate", tc.mcuBaudRate);
                     t.lookupValue("mcu_poll_interval_ms", tc.mcuPollIntervalMs);
@@ -240,12 +255,37 @@ bool Config::save()
         t.add("model", libconfig::Setting::TypeString) = tc.model;
         t.add("description", libconfig::Setting::TypeString) = tc.description;
         t.add("enabled", libconfig::Setting::TypeBoolean) = tc.enabled;
-        t.add("telnet_port", libconfig::Setting::TypeInt) = tc.telnetPort;
-        t.add("console_port", libconfig::Setting::TypeString) = tc.consolePort;
-        t.add("console_baud_rate", libconfig::Setting::TypeInt) = tc.consoleBaudRate;
-        t.add("mcu_port", libconfig::Setting::TypeString) = tc.mcuPort;
-        t.add("mcu_baud_rate", libconfig::Setting::TypeInt) = tc.mcuBaudRate;
-        t.add("mcu_poll_interval_ms", libconfig::Setting::TypeInt) = tc.mcuPollIntervalMs;
+
+        // MCU group
+        if (!tc.mcu.port.empty()) {
+            libconfig::Setting &mcu = t.add("mcu", libconfig::Setting::TypeGroup);
+            mcu.add("device", libconfig::Setting::TypeString) = tc.mcu.port;
+            mcu.add("baud_rate", libconfig::Setting::TypeInt) = tc.mcu.baudRate;
+            mcu.add("prompt", libconfig::Setting::TypeString) = tc.mcu.prompt;
+            mcu.add("telnet_port", libconfig::Setting::TypeInt) = tc.mcu.telnetPort;
+            mcu.add("poll_interval_ms", libconfig::Setting::TypeInt) = tc.mcu.pollIntervalMs;
+        } else if (!tc.mcuPort.empty()) {
+            t.add("mcu_port", libconfig::Setting::TypeString) = tc.mcuPort;
+            t.add("mcu_baud_rate", libconfig::Setting::TypeInt) = tc.mcuBaudRate;
+            t.add("mcu_poll_interval_ms", libconfig::Setting::TypeInt) = tc.mcuPollIntervalMs;
+        }
+
+        // Consoles list
+        if (!tc.consoles.empty()) {
+            libconfig::Setting &consoles = t.add("consoles", libconfig::Setting::TypeList);
+            for (const auto &cc : tc.consoles) {
+                libconfig::Setting &c = consoles.add(libconfig::Setting::TypeGroup);
+                c.add("name", libconfig::Setting::TypeString) = cc.name;
+                c.add("device", libconfig::Setting::TypeString) = cc.port;
+                c.add("baud_rate", libconfig::Setting::TypeInt) = cc.baudRate;
+                c.add("telnet_port", libconfig::Setting::TypeInt) = cc.telnetPort;
+                c.add("buffer_lines", libconfig::Setting::TypeInt) = static_cast<int>(cc.lineBufferCapacity);
+            }
+        } else if (!tc.consolePort.empty()) {
+            t.add("telnet_port", libconfig::Setting::TypeInt) = tc.telnetPort;
+            t.add("console_port", libconfig::Setting::TypeString) = tc.consolePort;
+            t.add("console_baud_rate", libconfig::Setting::TypeInt) = tc.consoleBaudRate;
+        }
     }
 
     try {

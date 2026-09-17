@@ -8,6 +8,7 @@
 #define EMBDEVENV_TARGET_HXX
 
 #include <string>
+#include <vector>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include "Console.hxx"
@@ -22,7 +23,7 @@ public:
            const std::string &model,
            const std::string &description,
            bool enabled,
-           int telnetPort);
+           int telnetPort = 0);
     virtual ~Target();
 
     virtual bool start();
@@ -35,8 +36,16 @@ public:
     bool isEnabled() const;
     int getTelnetPort() const;
 
-    std::shared_ptr<Console> getConsole() const;
+    void addConsole(std::shared_ptr<Console> console);
+    const std::vector<std::shared_ptr<Console>> &getConsoles() const;
+    std::shared_ptr<Console> getConsole(size_t index = 0) const;
+    std::shared_ptr<Console> getConsoleByName(const std::string &name) const;
+
+    void setMcu(std::shared_ptr<Mcu> mcu);
     std::shared_ptr<Mcu> getMcu() const;
+
+    void addTelnetServer(std::shared_ptr<TelnetServer> telnetServer);
+    const std::vector<std::shared_ptr<TelnetServer>> &getTelnetServers() const;
     std::shared_ptr<TelnetServer> getTelnetServer() const;
 
     virtual nlohmann::json getStatusJson() const;
@@ -49,9 +58,9 @@ protected:
     int _telnetPort;
     bool _running;
 
-    std::shared_ptr<Console> _console;
+    std::vector<std::shared_ptr<Console>> _consoles;
     std::shared_ptr<Mcu> _mcu;
-    std::shared_ptr<TelnetServer> _telnetServer;
+    std::vector<std::shared_ptr<TelnetServer>> _telnetServers;
 };
 
 } // namespace embdevenv

@@ -11,13 +11,31 @@
 
 namespace embdevenv {
 
-Console::Console(const std::string &port, int baudRate, size_t lineBufferCapacity)
-    : _port(port)
+Console::Console(const std::string &name, const std::string &port, int baudRate,
+                 size_t lineBufferCapacity, int telnetPort)
+    : _name(name)
+    , _port(port)
     , _baudRate(baudRate)
+    , _telnetPort(telnetPort)
     , _serial(_port, _baudRate)
     , _running(false)
     , _connected(false)
     , _lineBuffer(lineBufferCapacity)
+    , _lastCharWasCr(false)
+    , _nextListenerId(1)
+{
+}
+
+Console::Console(const std::string &port, int baudRate, size_t lineBufferCapacity)
+    : _name("console")
+    , _port(port)
+    , _baudRate(baudRate)
+    , _telnetPort(0)
+    , _serial(_port, _baudRate)
+    , _running(false)
+    , _connected(false)
+    , _lineBuffer(lineBufferCapacity)
+    , _lastCharWasCr(false)
     , _nextListenerId(1)
 {
 }
@@ -78,7 +96,12 @@ ssize_t Console::write(const std::string &data)
 
 std::vector<std::string> Console::getRecentLines(size_t count) const
 {
-    return _lineBuffer.getLatest(count);
+    std::lock_guard<std::mutex> lock(_lineMutex);
+    std::vector<std::string> lines = _lineBuffer.getLatest(count);
+    if (!_partialLine.empty()) {
+        lines.push_back(_partialLine);
+    }
+    return lines;
 }
 
 void Console::clearBuffer()
@@ -86,6 +109,7 @@ void Console::clearBuffer()
     std::lock_guard<std::mutex> lock(_lineMutex);
     _lineBuffer.clear();
     _partialLine.clear();
+    _lastCharWasCr = false;
 }
 
 int Console::addListener(OutputCallback callback)
@@ -107,6 +131,11 @@ void Console::removeListener(int listenerId)
         _listeners.end());
 }
 
+const std::string &Console::getName() const
+{
+    return _name;
+}
+
 const std::string &Console::getPort() const
 {
     return _port;
@@ -115,6 +144,11 @@ const std::string &Console::getPort() const
 int Console::getBaudRate() const
 {
     return _baudRate;
+}
+
+int Console::getTelnetPort() const
+{
+    return _telnetPort;
 }
 
 void Console::readWorker()
@@ -157,12 +191,22 @@ void Console::readWorker()
                 for (ssize_t i = 0; i < n; ++i) {
                     char c = buf[i];
                     if (c == '\n') {
-                        if (!_partialLine.empty() && _partialLine.back() == '\r') {
-                            _partialLine.pop_back();
+                        if (_lastCharWasCr) {
+                            // \r was already handled; ignore matching \n in \r\n pair
+                            _lastCharWasCr = false;
+                        } else {
+                            // Standalone \n
+                            _lineBuffer.push(_partialLine);
+                            _partialLine.clear();
                         }
-                        _lineBuffer.push(_partialLine);
-                        _partialLine.clear();
+                    } else if (c == '\r') {
+                        if (!_lastCharWasCr) {
+                            _lineBuffer.push(_partialLine);
+                            _partialLine.clear();
+                            _lastCharWasCr = true;
+                        }
                     } else {
+                        _lastCharWasCr = false;
                         _partialLine += c;
                         // Avoid unbounded partial line growth if no newline occurs
                         if (_partialLine.size() > 4096) {

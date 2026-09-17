@@ -10,17 +10,21 @@
 #include <regex>
 #include <cstdio>
 #include <ctime>
+#include <algorithm>
 
 namespace embdevenv {
 
-N1655Mcu::N1655Mcu(const std::string &port, int baudRate, int pollIntervalMs)
+N1655Mcu::N1655Mcu(const std::string &port, int baudRate, int pollIntervalMs, int telnetPort)
     : _port(port)
     , _baudRate(baudRate)
     , _pollIntervalMs(pollIntervalMs > 0 ? pollIntervalMs : 2000)
+    , _telnetPort(telnetPort)
     , _serial(_port, _baudRate)
     , _telemetryStore(std::make_shared<TelemetryStore>(1000))
     , _running(false)
     , _connected(false)
+    , _activeClients(0)
+    , _nextListenerId(1)
 {
 }
 
@@ -85,20 +89,94 @@ int N1655Mcu::getPollIntervalMs() const
     return _pollIntervalMs;
 }
 
+int N1655Mcu::getTelnetPort() const
+{
+    return _telnetPort;
+}
+
 std::shared_ptr<TelemetryStore> N1655Mcu::getTelemetryStore() const
 {
     return _telemetryStore;
 }
 
+ssize_t N1655Mcu::write(const char *data, size_t len)
+{
+    if (data == nullptr || len == 0) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(_cmdMutex);
+    if (!_serial.isOpen()) {
+        if (!_serial.open(_port, _baudRate)) {
+            _connected = false;
+            return -1;
+        }
+        _connected = true;
+    }
+
+    return _serial.write(data, len);
+}
+
+ssize_t N1655Mcu::write(const std::string &data)
+{
+    return write(data.data(), data.size());
+}
+
+int N1655Mcu::addListener(OutputCallback callback)
+{
+    std::lock_guard<std::mutex> lock(_listenersMutex);
+    int id = _nextListenerId++;
+    _listeners.emplace_back(id, std::move(callback));
+    return id;
+}
+
+void N1655Mcu::removeListener(int listenerId)
+{
+    std::lock_guard<std::mutex> lock(_listenersMutex);
+    _listeners.erase(
+        std::remove_if(_listeners.begin(), _listeners.end(),
+                       [listenerId](const std::pair<int, OutputCallback> &item) {
+                           return item.first == listenerId;
+                       }),
+        _listeners.end());
+}
+
+void N1655Mcu::onClientConnect()
+{
+    _activeClients.fetch_add(1);
+}
+
+void N1655Mcu::onClientDisconnect()
+{
+    int cur = _activeClients.load();
+    while (cur > 0 && !_activeClients.compare_exchange_weak(cur, cur - 1)) {
+    }
+}
+
+void N1655Mcu::broadcastOutput(const char *data, size_t len)
+{
+    std::vector<OutputCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(_listenersMutex);
+        callbacks.reserve(_listeners.size());
+        for (const auto &pair : _listeners) {
+            callbacks.push_back(pair.second);
+        }
+    }
+
+    for (const auto &cb : callbacks) {
+        if (cb) {
+            cb(data, len);
+        }
+    }
+}
+
 bool N1655Mcu::recoverPrompt(int timeoutMs)
 {
-    // Send Ctrl-C to cancel any active streaming or partial input
     const char ctrlC = '\003';
     _serial.write(&ctrlC, 1);
-    _serial.flush();
-
-    // Send a return
     _serial.write("\r", 1);
+    _serial.flush();
 
     char buf[128];
     auto start = std::chrono::steady_clock::now();
@@ -110,7 +188,7 @@ bool N1655Mcu::recoverPrompt(int timeoutMs)
         if (n > 0) {
             buf[n] = '\0';
             resp += buf;
-            if (resp.find("# ") != std::string::npos || resp.find('#') != std::string::npos) {
+            if (resp.find('#') != std::string::npos) {
                 return true;
             }
         }
@@ -131,17 +209,14 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
         _connected = true;
     }
 
-    // Clean buffer
     _serial.flush();
 
-    // Send command with carriage return
     std::string fullCmd = cmd;
     if (fullCmd.empty() || fullCmd.back() != '\r') {
         fullCmd += '\r';
     }
     _serial.write(fullCmd);
 
-    // Read until "# " prompt or timeout
     std::string response;
     char buf[256];
     auto start = std::chrono::steady_clock::now();
@@ -152,8 +227,11 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
         if (n > 0) {
             buf[n] = '\0';
             response += buf;
+            broadcastOutput(buf, static_cast<size_t>(n));
 
-            // Prompt ended with "# "
+            if (!response.empty() && response.back() == '#') {
+                break;
+            }
             if (response.size() >= 2 && response.substr(response.size() - 2) == "# ") {
                 break;
             }
@@ -164,9 +242,9 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
         }
     }
 
-    // Trim trailing prompt "# " if present
-    if (response.size() >= 2 && response.substr(response.size() - 2) == "# ") {
-        response.erase(response.size() - 2);
+    // Trim trailing prompt
+    while (!response.empty() && (response.back() == '#' || response.back() == ' ')) {
+        response.pop_back();
     }
 
     return response;
@@ -174,19 +252,19 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
 
 bool N1655Mcu::powerOn()
 {
-    std::string resp = sendCommand("power on", 3000);
+    std::string resp = sendCommand("pwr on", 3000);
     return !resp.empty();
 }
 
 bool N1655Mcu::powerOff()
 {
-    std::string resp = sendCommand("power off", 3000);
+    std::string resp = sendCommand("pwr off -y", 3000);
     return !resp.empty();
 }
 
 bool N1655Mcu::reboot()
 {
-    std::string resp = sendCommand("reboot", 3000);
+    std::string resp = sendCommand("reset -y", 3000);
     return !resp.empty();
 }
 
@@ -206,8 +284,8 @@ bool N1655Mcu::parseTelemetryBlock(const std::string &block, TelemetrySample &sa
 
     bool foundAny = false;
 
-    // Pattern for voltage: KEY=12.34V or KEY=1.8V
-    std::regex vRegex("([A-Za-z0-9_]+)=([0-9]+\\.?[0-9]*)V");
+    // Pattern for voltage: KEY = 12.34V or KEY=1.8V
+    std::regex vRegex("([A-Za-z0-9_]+)\\s*=\\s*([0-9]+\\.?[0-9]*)V");
     auto vBegin = std::sregex_iterator(block.begin(), block.end(), vRegex);
     auto vEnd = std::sregex_iterator();
     for (auto it = vBegin; it != vEnd; ++it) {
@@ -218,23 +296,23 @@ bool N1655Mcu::parseTelemetryBlock(const std::string &block, TelemetrySample &sa
         foundAny = true;
     }
 
-    // Temperature pattern: TEMP=42.5C or TEMP=45C
-    std::regex tRegex("(?:TEMP|temp)=([0-9]+\\.?[0-9]*)C?");
+    // Temperature pattern: Tb = 45.6C or TEMP=42.5C
+    std::regex tRegex("(?:Tb|TEMP|temp)\\s*=\\s*([0-9]+\\.?[0-9]*)C?");
     std::smatch tMatch;
     if (std::regex_search(block, tMatch, tRegex)) {
         sample.temperatureC = std::stod(tMatch[1].str());
         foundAny = true;
     }
 
-    // Fan pattern: FAN=2400RPM or FAN=2400
-    std::regex fRegex("(?:FAN|fan)=([0-9]+)(?:RPM)?");
+    // Fan pattern: FAN_SPEED = 1164RPM or FAN=2400
+    std::regex fRegex("(?:FAN_SPEED|FAN|fan)\\s*=\\s*([0-9]+)(?:RPM)?");
     std::smatch fMatch;
     if (std::regex_search(block, fMatch, fRegex)) {
         sample.fanRpm = std::stoi(fMatch[1].str());
         foundAny = true;
     }
 
-    // Power status based on SYS_5V or any detected system voltage
+    // Power status based on SYS_5V or DCOUT
     auto it5v = sample.voltages.find("SYS_5V");
     if (it5v != sample.voltages.end()) {
         sample.powerOn = (it5v->second >= 4.5);
@@ -252,6 +330,8 @@ bool N1655Mcu::parseTelemetryBlock(const std::string &block, TelemetrySample &sa
 
 void N1655Mcu::pollWorker()
 {
+    char readBuf[256];
+
     while (_running) {
         bool connected = false;
         {
@@ -269,12 +349,70 @@ void N1655Mcu::pollWorker()
             connected = _connected;
         }
 
-        if (connected) {
-            std::string resp = sendCommand("bs", 1500);
-            if (!resp.empty()) {
-                TelemetrySample sample;
-                if (parseTelemetryBlock(resp, sample)) {
-                    _telemetryStore->addSample(sample);
+        if (!connected) {
+            std::unique_lock<std::mutex> lock(_cmdMutex);
+            _cv.wait_for(lock, std::chrono::milliseconds(1000), [this] {
+                return !_running;
+            });
+            continue;
+        }
+
+        // If Telnet client is connected, handle interactive streaming
+        if (_activeClients.load() > 0) {
+            ssize_t n = 0;
+            {
+                std::lock_guard<std::mutex> lock(_cmdMutex);
+                if (_serial.isOpen()) {
+                    n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
+                }
+            }
+            if (n > 0) {
+                readBuf[n] = '\0';
+                broadcastOutput(readBuf, static_cast<size_t>(n));
+            }
+            continue;
+        }
+
+        // Sampling telemetry via bs
+        {
+            std::lock_guard<std::mutex> lock(_cmdMutex);
+            if (_serial.isOpen()) {
+                _serial.flush();
+                _serial.write("bs\r");
+
+                std::string block;
+                auto start = std::chrono::steady_clock::now();
+                while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - start).count() < 1200) {
+                    ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
+                    if (n > 0) {
+                        readBuf[n] = '\0';
+                        block += readBuf;
+                        if (block.find("RPM") != std::string::npos) {
+                            break;
+                        }
+                    }
+                }
+
+                // Restore prompt with Ctrl-C
+                const char ctrlC = '\003';
+                _serial.write(&ctrlC, 1);
+                _serial.write("\r", 1);
+                _serial.flush();
+
+                // Drain trailing bytes
+                auto drainStart = std::chrono::steady_clock::now();
+                while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - drainStart).count() < 200) {
+                    ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 50);
+                    if (n <= 0) break;
+                }
+
+                if (!block.empty()) {
+                    TelemetrySample sample;
+                    if (parseTelemetryBlock(block, sample)) {
+                        _telemetryStore->addSample(sample);
+                    }
                 }
             }
         }
@@ -294,6 +432,7 @@ nlohmann::json N1655Mcu::getStatusJson() const
     j["running"] = _running.load();
     j["connected"] = _connected.load();
     j["pollIntervalMs"] = _pollIntervalMs;
+    j["telnetPort"] = _telnetPort;
 
     TelemetrySample latest;
     if (_telemetryStore->getLatest(latest)) {

@@ -10,17 +10,19 @@
 #include "Mcu.hxx"
 #include "SerialPort.hxx"
 #include "TelemetryStore.hxx"
+#include "TelnetBackend.hxx"
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
+#include <vector>
 
 namespace embdevenv {
 
-class N1655Mcu : public Mcu {
+class N1655Mcu : public Mcu, public ITelnetBackend {
 public:
-    N1655Mcu(const std::string &port, int baudRate = 115200, int pollIntervalMs = 2000);
+    N1655Mcu(const std::string &port, int baudRate = 115200, int pollIntervalMs = 2000, int telnetPort = 0);
     ~N1655Mcu() override;
 
     bool start() override;
@@ -33,30 +35,45 @@ public:
     bool reboot() override;
     std::string sendCommand(const std::string &cmd, int timeoutMs = 2000) override;
 
+    ssize_t write(const char *data, size_t len) override;
+    ssize_t write(const std::string &data) override;
+    int addListener(OutputCallback callback) override;
+    void removeListener(int listenerId) override;
+    void onClientConnect() override;
+    void onClientDisconnect() override;
+
     std::shared_ptr<TelemetryStore> getTelemetryStore() const override;
     nlohmann::json getStatusJson() const override;
 
     const std::string &getPort() const override;
     int getBaudRate() const override;
     int getPollIntervalMs() const;
+    int getTelnetPort() const;
 
 private:
     void pollWorker();
     bool recoverPrompt(int timeoutMs = 1000);
     bool parseTelemetryBlock(const std::string &block, TelemetrySample &sample);
+    void broadcastOutput(const char *data, size_t len);
 
     std::string _port;
     int _baudRate;
     int _pollIntervalMs;
+    int _telnetPort;
 
     SerialPort _serial;
     std::shared_ptr<TelemetryStore> _telemetryStore;
 
     std::atomic<bool> _running;
     std::atomic<bool> _connected;
+    std::atomic<int> _activeClients;
     std::thread _workerThread;
     mutable std::mutex _cmdMutex;
     std::condition_variable _cv;
+
+    mutable std::mutex _listenersMutex;
+    int _nextListenerId;
+    std::vector<std::pair<int, OutputCallback>> _listeners;
 };
 
 } // namespace embdevenv
