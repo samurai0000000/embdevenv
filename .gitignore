@@ -1,0 +1,11 @@
+.cursor
+.agents
+build/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+.DS_Store
+
+plan/
