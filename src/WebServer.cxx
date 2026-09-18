@@ -420,7 +420,7 @@ void WebServer::setupRoutes()
     });
 
     // WebSocket endpoint for interactive bidirectional serial console stream
-    _server->WebSocket(R"(/ws/targets/([^/]+)/console)", [](const httplib::Request &req, httplib::ws::WebSocket &ws) {
+    _server->WebSocket(R"(/ws/targets/([^/]+)/console)", [this](const httplib::Request &req, httplib::ws::WebSocket &ws) {
         std::string name = req.matches[1];
         auto target = TargetManager::getInstance().getTarget(name);
         if (!target) {
@@ -455,11 +455,11 @@ void WebServer::setupRoutes()
             }
         });
 
-        // Set timeout to 0 (infinite wait for incoming client keystrokes)
-        ws.set_read_timeout(0);
+        // Set timeout to 1 second so loop can check _running periodically
+        ws.set_read_timeout(1);
 
         std::string msg;
-        while (true) {
+        while (_running.load()) {
             auto res = ws.read(msg);
             if (res == httplib::ws::ReadResult::Fail) {
                 break;
@@ -472,6 +472,7 @@ void WebServer::setupRoutes()
             }
         }
 
+        ws.close();
         console->removeListener(listenerId);
     });
 }
