@@ -101,8 +101,7 @@ std::string FlashManager::ensureUsbMatrixBinary()
 
 std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, int timeoutSec)
 {
-    (void)timeoutSec;
-    std::string fullCmd = cmd + " 2>&1";
+    std::string fullCmd = "timeout " + std::to_string(timeoutSec > 0 ? timeoutSec : 60) + " " + cmd + " 2>&1";
     FILE *fp = popen(fullCmd.c_str(), "r");
     if (!fp) {
         exitCode = -1;
@@ -250,26 +249,35 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     // 2. Put board into forced USB boot mode if requested
     if (params.forceUsbBoot && targetObj->getMcu()) {
         result.stage = "usb_recovery_boot";
-        bool mcuOk = targetObj->getMcu()->resetUsbDownload(true);
-        if (!mcuOk) {
-            _isFlashing = false;
-            result.success = false;
-            result.stage = "usb_recovery_boot";
-            result.error = "Failed to trigger MCU resetUsbDownload for target '" + params.target + "'";
-            return result;
-        }
-
-        // Wait up to 5 seconds for USB device enumeration
+        
         bool detected = false;
-        for (int waitCount = 0; waitCount < 10; ++waitCount) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            auto devList = listUsbDevices();
-            if (devList.value("recovery_device_detected", false)) {
-                detected = true;
-                break;
+        // Hardware quirk: Sometimes the MCU state-latches. We allow up to 2 attempts.
+        for (int attempt = 1; attempt <= 2 && !detected; ++attempt) {
+            bool mcuOk = targetObj->getMcu()->resetUsbDownload(true);
+            if (!mcuOk) {
+                _isFlashing = false;
+                result.success = false;
+                result.error = "Failed to trigger MCU resetUsbDownload for target '" + params.target + "'";
+                return result;
+            }
+
+            // Wait up to 5 seconds for USB device enumeration
+            for (int waitCount = 0; waitCount < 10; ++waitCount) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                auto devList = listUsbDevices();
+                if (devList.value("recovery_device_detected", false)) {
+                    detected = true;
+                    break;
+                }
             }
         }
-        (void)detected;
+
+        if (!detected) {
+            _isFlashing = false;
+            result.success = false;
+            result.error = "Board failed to enumerate on USB bus in ROM0 mode after MCU reset. Flashing aborted.";
+            return result;
+        }
     }
 
     // 3. Build and execute usb-matrix command

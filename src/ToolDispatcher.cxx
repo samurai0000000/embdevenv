@@ -217,7 +217,7 @@ json ToolDispatcher::getToolDefinitions()
         },
         {
             {"name", "embdevenv_flash_target"},
-            {"description", "Flash firmware package to an embedded target board via usb-matrix (optionally triggering MCU USB download mode)."},
+            {"description", "Start flashing firmware to a target asynchronously. Use embdevenv_flash_get_status to monitor progress."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -507,7 +507,29 @@ std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, cons
     if (!target || !target->getConsole()) {
         return "Error: Console not available for '" + targetName + "'";
     }
-    ssize_t written = target->getConsole()->write(data);
+
+    std::string processed = data;
+    
+    // Unescape literal slash-n and slash-r in case the LLM sent escaped string representations
+    size_t pos = 0;
+    while ((pos = processed.find("\\n", pos)) != std::string::npos) {
+        processed.replace(pos, 2, "\n");
+        pos += 1;
+    }
+    pos = 0;
+    while ((pos = processed.find("\\r", pos)) != std::string::npos) {
+        processed.replace(pos, 2, "\r");
+        pos += 1;
+    }
+
+    // Normalize Windows-style \r\n bytes to standard \n to prevent double-enter execution in U-Boot
+    pos = 0;
+    while ((pos = processed.find("\r\n", pos)) != std::string::npos) {
+        processed.replace(pos, 2, "\n");
+        pos += 1;
+    }
+
+    ssize_t written = target->getConsole()->write(processed);
     json j = {
         {"target", targetName},
         {"success", written >= 0},
@@ -606,8 +628,22 @@ std::string ToolDispatcher::toolFlashTarget(const std::string &target,
     params.forceUsbBoot = forceUsbBoot;
     params.timeoutSec = timeoutSec;
 
-    FlashResult res = FlashManager::getInstance().flashTarget(params);
-    return res.toJson().dump(2);
+    // Check if flashing is already in progress to avoid silent drops
+    if (FlashManager::getInstance().isFlashing()) {
+        return "{\"success\": false, \"stage\": \"rejected\", \"error\": \"Another flashing operation is currently in progress.\"}";
+    }
+
+    std::thread([params]() {
+        FlashManager::getInstance().flashTarget(params);
+    }).detach();
+
+    json res = {
+        {"success", true},
+        {"stage", "started"},
+        {"target", params.target},
+        {"message", "Firmware flash initiated in the background. Use embdevenv_flash_get_status to monitor progress."}
+    };
+    return res.dump(2);
 }
 
 std::string ToolDispatcher::toolUsbListDevices()
