@@ -185,8 +185,22 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
         result.success = false;
         result.stage = "rejected";
         result.error = "Another firmware flashing operation is currently in progress";
+        std::lock_guard<std::mutex> lock(_mutex);
+        _lastResult = result;
         return result;
     }
+
+    auto updateState = [&](const std::string &stage, bool success = false, const std::string &error = "") {
+        result.stage = stage;
+        result.success = success;
+        if (!error.empty()) {
+            result.error = error;
+        }
+        std::lock_guard<std::mutex> lock(_mutex);
+        _lastResult = result;
+    };
+
+    updateState("preflight");
 
     auto startTime = std::chrono::steady_clock::now();
 
@@ -194,9 +208,7 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     auto targetObj = TargetManager::getInstance().getTarget(params.target);
     if (!targetObj) {
         _isFlashing = false;
-        result.success = false;
-        result.stage = "preflight";
-        result.error = "Target '" + params.target + "' not found in TargetManager";
+        updateState("preflight", false, "Target '" + params.target + "' not found in TargetManager");
         return result;
     }
 
@@ -216,39 +228,31 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
 
     if (fwImage.empty()) {
         _isFlashing = false;
-        result.success = false;
-        result.stage = "preflight";
-        result.error = "No firmware package image specified or configured for target '" + params.target + "'";
+        updateState("preflight", false, "No firmware package image specified or configured for target '" + params.target + "'");
         return result;
     }
 
     if (access(fwImage.c_str(), R_OK) != 0) {
         _isFlashing = false;
-        result.success = false;
-        result.stage = "preflight";
-        result.error = "Firmware image file not found or unreadable: " + fwImage;
+        updateState("preflight", false, "Firmware image file not found or unreadable: " + fwImage);
         return result;
     }
 
     if (!ustImage.empty() && access(ustImage.c_str(), R_OK) != 0) {
         _isFlashing = false;
-        result.success = false;
-        result.stage = "preflight";
-        result.error = "UST image file not found or unreadable: " + ustImage;
+        updateState("preflight", false, "UST image file not found or unreadable: " + ustImage);
         return result;
     }
 
     if (!bldImage.empty() && access(bldImage.c_str(), R_OK) != 0) {
         _isFlashing = false;
-        result.success = false;
-        result.stage = "preflight";
-        result.error = "BLD image file not found or unreadable: " + bldImage;
+        updateState("preflight", false, "BLD image file not found or unreadable: " + bldImage);
         return result;
     }
 
     // 2. Put board into forced USB boot mode if requested
     if (params.forceUsbBoot && targetObj->getMcu()) {
-        result.stage = "usb_recovery_boot";
+        updateState("usb_recovery_boot");
         
         bool detected = false;
         // Hardware quirk: Sometimes the MCU state-latches. We allow up to 2 attempts.
@@ -256,8 +260,7 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
             bool mcuOk = targetObj->getMcu()->resetUsbDownload(true);
             if (!mcuOk) {
                 _isFlashing = false;
-                result.success = false;
-                result.error = "Failed to trigger MCU resetUsbDownload for target '" + params.target + "'";
+                updateState("usb_recovery_boot", false, "Failed to trigger MCU resetUsbDownload for target '" + params.target + "'");
                 return result;
             }
 
@@ -274,14 +277,13 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
 
         if (!detected) {
             _isFlashing = false;
-            result.success = false;
-            result.error = "Board failed to enumerate on USB bus in ROM0 mode after MCU reset. Flashing aborted.";
+            updateState("usb_recovery_boot", false, "Board failed to enumerate on USB bus in ROM0 mode after MCU reset. Flashing aborted.");
             return result;
         }
     }
 
     // 3. Build and execute usb-matrix command
-    result.stage = "flashing";
+    updateState("flashing");
     std::string bin = ensureUsbMatrixBinary();
 
     std::string cmd = bin;
@@ -305,17 +307,9 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
         std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count());
 
     if (exitCode == 0) {
-        result.success = true;
-        result.stage = "completed";
+        updateState("completed", true);
     } else {
-        result.success = false;
-        result.stage = "failed";
-        result.error = "usb-matrix failed with exit code " + std::to_string(exitCode);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(_mutex);
-        _lastResult = result;
+        updateState("failed", false, "usb-matrix failed with exit code " + std::to_string(exitCode));
     }
 
     _isFlashing = false;
