@@ -70,6 +70,7 @@ set(SOURCES
     src/FlashManager.cxx
     src/AimonGatewayClient.cxx
     src/StandaloneMcpServer.cxx
+    src/InstanceLock.cxx
 )
 
 add_executable(embdevenv ${SOURCES})

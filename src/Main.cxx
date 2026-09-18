@@ -6,6 +6,7 @@
 
 #include "Version.hxx"
 #include "Config.hxx"
+#include "InstanceLock.hxx"
 #include "TargetFactory.hxx"
 #include "TargetManager.hxx"
 #include "WebServer.hxx"
@@ -73,6 +74,18 @@ int main(int argc, char **argv)
     }
 
     fprintf(stderr, "[embdevenv] Starting embdevenv %s\n", EMBDEVENV_VERSION_STRING);
+
+    // Enforce single instance per host
+    embdevenv::InstanceLock instanceLock;
+    if (!instanceLock.acquire()) {
+        fprintf(stderr,
+                "[embdevenv] Error: Another instance of embdevenv is already running on host '%s' (PID %d)\n"
+                "[embdevenv] Lock file: %s\n",
+                instanceLock.getHostname().c_str(),
+                static_cast<int>(instanceLock.getExistingPid()),
+                instanceLock.getLockFilePath().c_str());
+        return 1;
+    }
 
     // Setup signal handling
     struct sigaction sa;
@@ -156,6 +169,7 @@ int main(int argc, char **argv)
     // Stop Targets
     targetMgr.stopAll();
 
+    instanceLock.release();
     fprintf(stderr, "[embdevenv] Clean shutdown complete.\n");
     return 0;
 }
