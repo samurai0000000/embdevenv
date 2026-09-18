@@ -6,6 +6,7 @@
 
 #include "StandaloneMcpServer.hxx"
 #include "ToolDispatcher.hxx"
+#include "Version.hxx"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -123,7 +124,7 @@ void StandaloneMcpSession::handleLine(const std::string &line)
                     }},
                     {"serverInfo", {
                         {"name", "embdevenv"},
-                        {"version", "0.1.0"}
+                        {"version", EMBDEVENV_VERSION_STRING}
                     }}
                 }}
             };
