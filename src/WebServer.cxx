@@ -6,6 +6,7 @@
 
 #include "WebServer.hxx"
 #include "TargetManager.hxx"
+#include "FlashManager.hxx"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <cstdio>
@@ -370,6 +371,54 @@ void WebServer::setupRoutes()
         res.set_content(R"({"success":true})", "application/json");
     });
 
+    // List host USB devices via usb-matrix -l
+    _server->Get("/api/usb/devices", [](const httplib::Request &, httplib::Response &res) {
+        auto j = FlashManager::getInstance().listUsbDevices();
+        res.set_content(j.dump(2), "application/json");
+    });
+
+    // Flash target firmware
+    _server->Post(R"(/api/targets/([^/]+)/flash)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string name = req.matches[1];
+        auto target = TargetManager::getInstance().getTarget(name);
+        if (!target) {
+            res.status = 404;
+            res.set_content(R"({"error":"Target not found"})", "application/json");
+            return;
+        }
+
+        try {
+            FlashParams params;
+            params.target = name;
+            if (!req.body.empty()) {
+                auto body = nlohmann::json::parse(req.body);
+                params.chip = body.value("chip", "");
+                params.ustImage = body.value("ust_image", "");
+                params.bldImage = body.value("bld_image", "");
+                params.fwImage = body.value("fw_image", "");
+                params.forceUsbBoot = body.value("force_usb_boot", true);
+                params.timeoutSec = body.value("timeout_sec", 60);
+            }
+
+            FlashResult result = FlashManager::getInstance().flashTarget(params);
+            res.status = result.success ? 200 : 500;
+            res.set_content(result.toJson().dump(2), "application/json");
+        } catch (const std::exception &ex) {
+            res.status = 400;
+            nlohmann::json err;
+            err["error"] = ex.what();
+            res.set_content(err.dump(), "application/json");
+        }
+    });
+
+    // Flashing status for target
+    _server->Get(R"(/api/targets/([^/]+)/flash/status)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string name = req.matches[1];
+        auto result = FlashManager::getInstance().getLastResult(name).toJson();
+        result["is_flashing"] = FlashManager::getInstance().isFlashing();
+        res.set_content(result.dump(2), "application/json");
+    });
+
     // WebSocket endpoint for interactive bidirectional serial console stream
     _server->WebSocket(R"(/ws/targets/([^/]+)/console)", [](const httplib::Request &req, httplib::ws::WebSocket &ws) {
         std::string name = req.matches[1];
@@ -662,6 +711,38 @@ std::string WebServer::getDashboardHtml() const
         .btn-reboot:hover { filter: brightness(1.15); }
         .btn-usb-boot { background: var(--accent-indigo); color: #ffffff; }
         .btn-usb-boot:hover { filter: brightness(1.15); }
+        .btn-flash { background: linear-gradient(135deg, #06b6d4, #6366f1); color: #ffffff; grid-column: span 2; }
+        .btn-flash:hover { filter: brightness(1.15); box-shadow: 0 0 12px rgba(6, 182, 212, 0.4); }
+        .flash-form-group { display: flex; flex-direction: column; gap: 0.35rem; }
+        .flash-form-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+        .flash-form-input {
+            background: #0d1424;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-main);
+            padding: 0.45rem 0.65rem;
+            font-size: 0.85rem;
+            font-family: monospace;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .flash-form-input:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 8px rgba(6,182,212,0.25);
+        }
+        .flash-log-box {
+            background: #050811;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.6rem;
+            font-family: 'Lucida Console', 'Courier New', Monaco, monospace;
+            font-size: 0.75rem;
+            color: #94a3b8;
+            max-height: 160px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
         .btn-secondary { background: #22304d; color: var(--text-main); border: 1px solid var(--border); }
         .btn-secondary:hover { background: #2d3e63; }
         .btn-active { background: var(--accent-cyan); color: #050811; }
@@ -955,6 +1036,7 @@ std::string WebServer::getDashboardHtml() const
                         <button class="btn btn-power-off" onclick="requestPowerOff()">&#x25A0; Power OFF</button>
                         <button class="btn btn-reboot" onclick="requestReboot()">&#x21BB; Reboot</button>
                         <button class="btn btn-usb-boot" onclick="requestUsbBoot()">&#x1F50C; USB Boot</button>
+                        <button class="btn btn-flash" onclick="openFlashModal()">&#x26A1; Flash Firmware</button>
                     </div>
                     <div>
                         <div class="meta-row">
@@ -1057,6 +1139,66 @@ std::string WebServer::getDashboardHtml() const
         </div>
     </div>
 
+    <!-- Flash Firmware Modal -->
+    <div id="flashModal" class="modal-backdrop" style="display:none;">
+        <div class="modal-card" style="max-width:560px;">
+            <div class="modal-title" style="color:var(--accent-cyan);">
+                <span>&#x26A1;</span> Flash Firmware: <span id="flashTargetName" style="color:var(--text-main);">-</span>
+            </div>
+            <div class="modal-desc" style="display:flex; flex-direction:column; gap:0.8rem;">
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem;">
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">Chip Architecture</label>
+                        <input id="flashChipInput" class="flash-form-input" type="text" placeholder="cv3ad655">
+                    </div>
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">Force USB Boot Mode</label>
+                        <label style="display:flex; align-items:center; gap:0.5rem; height:34px; cursor:pointer; font-size:0.85rem; color:var(--text-main);">
+                            <input id="flashForceUsbBoot" type="checkbox" checked>
+                            <span>MCU reset -usb -y</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="flash-form-group">
+                    <label class="flash-form-label">Firmware Package (*.bin / *.pkg)</label>
+                    <input id="flashFwInput" class="flash-form-input" type="text" placeholder="/path/to/firmware.bin">
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem;">
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">UST Image (Optional)</label>
+                        <input id="flashUstInput" class="flash-form-input" type="text" placeholder="/path/to/ust.bin">
+                    </div>
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">BLD Image (Optional)</label>
+                        <input id="flashBldInput" class="flash-form-input" type="text" placeholder="/path/to/bld.bin">
+                    </div>
+                </div>
+
+                <div style="background:#0d1424; border:1px solid var(--border); border-radius:6px; padding:0.5rem 0.75rem; display:flex; align-items:center; justify-content:space-between;">
+                    <div style="display:flex; align-items:center; gap:0.5rem; font-size:0.8rem;">
+                        <span style="color:var(--text-muted);">USB Device:</span>
+                        <span id="flashUsbStatus" class="status-pill" style="font-size:0.7rem;">Checking...</span>
+                    </div>
+                    <button class="btn btn-secondary" style="padding:0.25rem 0.55rem; font-size:0.75rem;" onclick="scanUsbDevices()">&#x1F50D; Scan USB</button>
+                </div>
+
+                <div id="flashStatusArea" style="display:none; flex-direction:column; gap:0.4rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem;">
+                        <span id="flashStatusMsg" style="font-weight:600; color:var(--accent-cyan);">Flashing in progress...</span>
+                        <span id="flashTimer" style="color:var(--text-muted); font-size:0.75rem;"></span>
+                    </div>
+                    <pre id="flashLogArea" class="flash-log-box"></pre>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button id="flashCancelBtn" class="btn btn-secondary" onclick="closeFlashModal()">Cancel</button>
+                <button id="flashSubmitBtn" class="btn btn-flash" style="grid-column:unset;" onclick="executeFlashFirmware()">&#x26A1; Flash Now</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let targets = [];
         let activeTarget = '';
@@ -1109,6 +1251,153 @@ std::string WebServer::getDashboardHtml() const
         function closeSafetyModal() {
             document.getElementById('safetyModal').style.display = 'none';
             pendingPowerAction = null;
+        }
+
+        // Flash Modal Handlers
+        let isFlashingOperation = false;
+
+        async function openFlashModal() {
+            if (!activeTarget) return;
+            const targetObj = targets.find(t => t.name === activeTarget);
+            document.getElementById('flashTargetName').textContent = activeTarget;
+            
+            const chipInput = document.getElementById('flashChipInput');
+            const fwInput = document.getElementById('flashFwInput');
+            const ustInput = document.getElementById('flashUstInput');
+            const bldInput = document.getElementById('flashBldInput');
+            const forceUsb = document.getElementById('flashForceUsbBoot');
+
+            const fl = (targetObj && targetObj.flashing) ? targetObj.flashing : {};
+            chipInput.value = fl.chip || 'cv3ad655';
+            fwInput.value = fl.defaultFwImage || '';
+            ustInput.value = fl.ustImage || '';
+            bldInput.value = fl.bldImage || '';
+            forceUsb.checked = true;
+
+            document.getElementById('flashStatusArea').style.display = 'none';
+            document.getElementById('flashLogArea').textContent = '';
+            document.getElementById('flashSubmitBtn').disabled = false;
+            document.getElementById('flashCancelBtn').disabled = false;
+            document.getElementById('flashModal').style.display = 'flex';
+
+            await scanUsbDevices();
+        }
+
+        function closeFlashModal() {
+            if (isFlashingOperation) {
+                if (!confirm("Flashing is currently in progress. Close modal anyway?")) return;
+            }
+            document.getElementById('flashModal').style.display = 'none';
+        }
+
+        async function scanUsbDevices() {
+            const statusEl = document.getElementById('flashUsbStatus');
+            statusEl.textContent = 'Scanning...';
+            statusEl.style.background = 'rgba(255,255,255,0.06)';
+            statusEl.style.color = 'var(--text-muted)';
+            statusEl.style.borderColor = 'var(--border)';
+
+            try {
+                const res = await fetch('/api/usb/devices');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                if (data.recovery_device_detected) {
+                    statusEl.textContent = 'Recovery Mode (4255:001d)';
+                    statusEl.style.background = 'rgba(16,185,129,0.15)';
+                    statusEl.style.color = 'var(--accent-emerald)';
+                    statusEl.style.borderColor = 'rgba(16,185,129,0.3)';
+                } else if (data.devices && data.devices.length > 0) {
+                    statusEl.textContent = `${data.devices.length} USB dev(s)`;
+                    statusEl.style.background = 'rgba(6,182,212,0.15)';
+                    statusEl.style.color = 'var(--accent-cyan)';
+                    statusEl.style.borderColor = 'rgba(6,182,212,0.3)';
+                } else {
+                    statusEl.textContent = 'No devices found';
+                    statusEl.style.background = 'rgba(244,63,94,0.15)';
+                    statusEl.style.color = 'var(--accent-rose)';
+                    statusEl.style.borderColor = 'rgba(244,63,94,0.3)';
+                }
+            } catch (err) {
+                statusEl.textContent = 'Scan error';
+                statusEl.style.background = 'rgba(244,63,94,0.15)';
+                statusEl.style.color = 'var(--accent-rose)';
+            }
+        }
+
+        async function executeFlashFirmware() {
+            if (!activeTarget || isFlashingOperation) return;
+
+            const chip = document.getElementById('flashChipInput').value.trim();
+            const fwImage = document.getElementById('flashFwInput').value.trim();
+            const ustImage = document.getElementById('flashUstInput').value.trim();
+            const bldImage = document.getElementById('flashBldInput').value.trim();
+            const forceUsbBoot = document.getElementById('flashForceUsbBoot').checked;
+
+            if (!fwImage) {
+                alert('Please specify the Firmware Package image path.');
+                return;
+            }
+
+            isFlashingOperation = true;
+            const submitBtn = document.getElementById('flashSubmitBtn');
+            const cancelBtn = document.getElementById('flashCancelBtn');
+            const statusArea = document.getElementById('flashStatusArea');
+            const statusMsg = document.getElementById('flashStatusMsg');
+            const logArea = document.getElementById('flashLogArea');
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Flashing...';
+            cancelBtn.disabled = true;
+            statusArea.style.display = 'flex';
+            statusMsg.textContent = forceUsbBoot ? 'Rebooting target into USB download mode...' : 'Invoking usb-matrix...';
+            statusMsg.style.color = 'var(--accent-cyan)';
+            logArea.textContent = 'Initiating firmware flash sequence for ' + activeTarget + '...\n';
+
+            const startTime = Date.now();
+            const timerEl = document.getElementById('flashTimer');
+            const timerInterval = setInterval(() => {
+                const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+                timerEl.textContent = `${elapsedSec}s`;
+            }, 200);
+
+            try {
+                const res = await fetch(`/api/targets/${activeTarget}/flash`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chip: chip || undefined,
+                        fw_image: fwImage,
+                        ust_image: ustImage || undefined,
+                        bld_image: bldImage || undefined,
+                        force_usb_boot: forceUsbBoot
+                    })
+                });
+
+                clearInterval(timerInterval);
+                const data = await res.json();
+
+                if (data.success) {
+                    statusMsg.textContent = `✓ Firmware Flashing Succeeded! (${(data.duration_ms/1000).toFixed(1)}s)`;
+                    statusMsg.style.color = 'var(--accent-emerald)';
+                } else {
+                    statusMsg.textContent = `✗ Flashing Failed (${data.stage || 'error'}): ${data.error || 'Unknown error'}`;
+                    statusMsg.style.color = 'var(--accent-rose)';
+                }
+
+                logArea.textContent = data.usb_matrix_log || data.error || JSON.stringify(data, null, 2);
+                logArea.scrollTop = logArea.scrollHeight;
+            } catch (err) {
+                clearInterval(timerInterval);
+                statusMsg.textContent = '✗ Request failed: ' + err.message;
+                statusMsg.style.color = 'var(--accent-rose)';
+                logArea.textContent = String(err);
+            } finally {
+                isFlashingOperation = false;
+                submitBtn.disabled = false;
+                submitBtn.textContent = '⚡ Flash Now';
+                cancelBtn.disabled = false;
+                setTimeout(pollActiveTarget, 1000);
+            }
         }
 
         async function executePendingPowerAction() {

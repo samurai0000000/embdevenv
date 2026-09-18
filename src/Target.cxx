@@ -5,6 +5,7 @@
  */
 
 #include "Target.hxx"
+#include "Config.hxx"
 #include <cstdio>
 
 namespace embdevenv {
@@ -241,6 +242,18 @@ nlohmann::json Target::getStatusJson() const
         j["telnet"] = t;
     } else {
         j["telnet"] = nullptr;
+    }
+
+    for (const auto &tc : Config::getInstance().getTargets()) {
+        if (tc.name == _name) {
+            j["flashing"] = {
+                {"chip", tc.flashing.chip},
+                {"ustImage", tc.flashing.ustImage},
+                {"bldImage", tc.flashing.bldImage},
+                {"defaultFwImage", tc.flashing.defaultFwImage}
+            };
+            break;
+        }
     }
 
     return j;

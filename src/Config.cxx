@@ -76,6 +76,11 @@ const McpConfig &Config::getMcpConfig() const
     return _mcpConfig;
 }
 
+const FlashingGlobalConfig &Config::getFlashingGlobalConfig() const
+{
+    return _flashingConfig;
+}
+
 const std::vector<TargetConfig> &Config::getTargets() const
 {
     return _targets;
@@ -149,6 +154,18 @@ bool Config::load(const std::string &customPath)
         }
     }
 
+    // Global flashing section
+    if (cfg.exists("flashing")) {
+        try {
+            const libconfig::Setting &fSetting = cfg.lookup("flashing");
+            std::string bin;
+            if (fSetting.lookupValue("usb_matrix_bin", bin)) {
+                _flashingConfig.usbMatrixBin = resolveHomePath(bin);
+            }
+        } catch (const libconfig::SettingNotFoundException &) {
+        }
+    }
+
     // Targets section
     if (cfg.exists("targets")) {
         try {
@@ -202,6 +219,23 @@ bool Config::load(const std::string &customPath)
                         mcuSetting.lookupValue("prompt", tc.mcu.prompt);
                         mcuSetting.lookupValue("telnet_port", tc.mcu.telnetPort);
                         mcuSetting.lookupValue("poll_interval_ms", tc.mcu.pollIntervalMs);
+                    }
+
+                    // Flashing group
+                    if (t.exists("flashing")) {
+                        const libconfig::Setting &fs = t.lookup("flashing");
+                        fs.lookupValue("enabled", tc.flashing.enabled);
+                        fs.lookupValue("chip", tc.flashing.chip);
+                        std::string ustPath, bldPath, fwPath;
+                        if (fs.lookupValue("ust_image", ustPath)) {
+                            tc.flashing.ustImage = resolveHomePath(ustPath);
+                        }
+                        if (fs.lookupValue("bld_image", bldPath)) {
+                            tc.flashing.bldImage = resolveHomePath(bldPath);
+                        }
+                        if (fs.lookupValue("default_fw_image", fwPath) || fs.lookupValue("fw_image", fwPath)) {
+                            tc.flashing.defaultFwImage = resolveHomePath(fwPath);
+                        }
                     }
 
                     // Legacy flat mcu fields
@@ -285,6 +319,24 @@ bool Config::save()
             t.add("telnet_port", libconfig::Setting::TypeInt) = tc.telnetPort;
             t.add("console_port", libconfig::Setting::TypeString) = tc.consolePort;
             t.add("console_baud_rate", libconfig::Setting::TypeInt) = tc.consoleBaudRate;
+        }
+
+        // Flashing group
+        if (tc.flashing.enabled || !tc.flashing.chip.empty() || !tc.flashing.defaultFwImage.empty()) {
+            libconfig::Setting &fl = t.add("flashing", libconfig::Setting::TypeGroup);
+            fl.add("enabled", libconfig::Setting::TypeBoolean) = tc.flashing.enabled;
+            if (!tc.flashing.chip.empty()) {
+                fl.add("chip", libconfig::Setting::TypeString) = tc.flashing.chip;
+            }
+            if (!tc.flashing.ustImage.empty()) {
+                fl.add("ust_image", libconfig::Setting::TypeString) = tc.flashing.ustImage;
+            }
+            if (!tc.flashing.bldImage.empty()) {
+                fl.add("bld_image", libconfig::Setting::TypeString) = tc.flashing.bldImage;
+            }
+            if (!tc.flashing.defaultFwImage.empty()) {
+                fl.add("default_fw_image", libconfig::Setting::TypeString) = tc.flashing.defaultFwImage;
+            }
         }
     }
 

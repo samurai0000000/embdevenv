@@ -36,6 +36,15 @@ private:
     static std::string toolConsoleClear(const std::string &target);
     static std::string toolTelnetGetStatus(const std::string &target);
     static std::string toolGetConfig();
+    static std::string toolFlashTarget(const std::string &target,
+                                       const std::string &chip,
+                                       const std::string &ustImage,
+                                       const std::string &bldImage,
+                                       const std::string &fwImage,
+                                       bool forceUsbBoot,
+                                       int timeoutSec);
+    static std::string toolUsbListDevices();
+    static std::string toolFlashGetStatus(const std::string &target);
 };
 
 } // namespace embdevenv

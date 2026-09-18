@@ -78,7 +78,9 @@ The daemon is implemented under `namespace embdevenv`:
 
 ### 3.3 Network, Web & AI Gateway
 - **`WebServer`**: Embedded HTTP service based on `httplib::Server` hosting the single-page web dashboard and REST API.
-- **`ToolDispatcher`**: Central MCP dispatcher enumerating schemas for 18 tools and routing invocations to `TargetManager` and `Config`.
+- **`ToolDispatcher`**: Central MCP dispatcher enumerating schemas for 21 tools and routing invocations to `TargetManager`, `FlashManager`, and `Config`.
+- **`FlashManager`**: Singleton service orchestrating USB recovery mode detection, embedded `usb-matrix` extraction (`~/.config/embdevenv/bin/usb-matrix`), and firmware flashing execution.
+- **`UsbMatrixEmbedded`**: Compiled binary asset containing the embedded `usb-matrix` executable.
 - **`AimonGatewayClient`**: Resilient TCP client maintaining an asynchronous JSON-RPC 2.0 session with the `aimon` gateway hub, handling capability registration and tool dispatch.
 - **`StandaloneMcpServer`**: Autonomous TCP listener serving MCP JSON-RPC requests for standalone environments without an external gateway.
 - **`Config`**: Singleton configuration parser and serializer built on `libconfig++`.
@@ -154,7 +156,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 
 ## 8. MCP Server & Gateway Integration
 
-`embdevenv` exposes 18 structured tools for AI agent interaction:
+`embdevenv` exposes 21 structured tools for AI agent interaction:
 
 | MCP Tool Name | Description |
 | :--- | :--- |
@@ -176,6 +178,9 @@ The embedded web server serves both a responsive UI and REST endpoints:
 | `embdevenv_console_clear` | Clear console buffer memory |
 | `embdevenv_telnet_get_status` | Get Telnet server port and active session count |
 | `embdevenv_get_config` | Retrieve active daemon configuration |
+| `embdevenv_flash_target` | Flash firmware package to an embedded target board via usb-matrix |
+| `embdevenv_usb_list_devices` | Scan host USB buses for connected targets and recovery devices |
+| `embdevenv_flash_get_status` | Get status and log output of the most recent firmware flashing operation |
 
 ---
 
@@ -198,6 +203,10 @@ mcp: {
     reconnect_interval_sec = 5;
 };
 
+flashing: {
+    usb_matrix_bin = "~/.config/embdevenv/bin/usb-matrix";
+};
+
 targets = (
     {
         name = "n1-655-pro";
@@ -210,6 +219,12 @@ targets = (
         mcu_port = "/dev/ttyCH9344USB3";
         mcu_baud_rate = 115200;
         mcu_poll_interval_ms = 2000;
+        flashing: {
+            chip = "cv3ad655";
+            ust_image = "~/images/ust.bin";
+            bld_image = "~/images/bld.bin";
+            default_fw_image = "~/images/firmware.bin";
+        };
     },
     {
         name = "n1-655-devkit";
@@ -222,6 +237,12 @@ targets = (
         mcu_port = "/dev/ttyCH9344USB11";
         mcu_baud_rate = 115200;
         mcu_poll_interval_ms = 2000;
+        flashing: {
+            chip = "cv3ad655";
+            ust_image = "~/images/ust.bin";
+            bld_image = "~/images/bld.bin";
+            default_fw_image = "~/images/firmware.bin";
+        };
     }
 );
 ```

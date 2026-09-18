@@ -7,6 +7,7 @@
 #include "ToolDispatcher.hxx"
 #include "TargetManager.hxx"
 #include "Config.hxx"
+#include "FlashManager.hxx"
 #include <sstream>
 
 namespace embdevenv {
@@ -213,6 +214,42 @@ json ToolDispatcher::getToolDefinitions()
                 {"type", "object"},
                 {"properties", json::object()}
             }}
+        },
+        {
+            {"name", "embdevenv_flash_target"},
+            {"description", "Flash firmware package to an embedded target board via usb-matrix (optionally triggering MCU USB download mode)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name (e.g. 'n1-655-pro')"}}},
+                    {"chip", {{"type", "string"}, {"description", "Chip architecture (e.g. 'cv3ad655', optional, defaults to target config)"}}},
+                    {"ust_image", {{"type", "string"}, {"description", "Path to UST binary (optional, defaults to target config)"}}},
+                    {"bld_image", {{"type", "string"}, {"description", "Path to BLD binary (optional, defaults to target config)"}}},
+                    {"fw_image", {{"type", "string"}, {"description", "Path to firmware package binary (optional, defaults to target config)"}}},
+                    {"force_usb_boot", {{"type", "boolean"}, {"description", "Trigger MCU reset -usb -y before flashing (default: true)"}}},
+                    {"timeout_sec", {{"type", "integer"}, {"description", "Flashing timeout in seconds (default: 60)"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_usb_list_devices"},
+            {"description", "Scan host USB buses for connected targets and recovery devices via usb-matrix -l."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", json::object()}
+            }}
+        },
+        {
+            {"name", "embdevenv_flash_get_status"},
+            {"description", "Get status and log output of the most recent firmware flashing operation for a target."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
         }
     });
 }
@@ -225,6 +262,10 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
 
     if (name == "embdevenv_get_config") {
         return toolGetConfig();
+    }
+
+    if (name == "embdevenv_usb_list_devices") {
+        return toolUsbListDevices();
     }
 
     std::string target = args.value("target", "");
@@ -270,6 +311,16 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return toolConsoleClear(target);
     } else if (name == "embdevenv_telnet_get_status") {
         return toolTelnetGetStatus(target);
+    } else if (name == "embdevenv_flash_target") {
+        std::string chip = args.value("chip", "");
+        std::string ustImage = args.value("ust_image", "");
+        std::string bldImage = args.value("bld_image", "");
+        std::string fwImage = args.value("fw_image", "");
+        bool forceUsbBoot = args.value("force_usb_boot", true);
+        int timeoutSec = args.value("timeout_sec", 60);
+        return toolFlashTarget(target, chip, ustImage, bldImage, fwImage, forceUsbBoot, timeoutSec);
+    } else if (name == "embdevenv_flash_get_status") {
+        return toolFlashGetStatus(target);
     }
 
     return "Error: Unknown tool " + name;
@@ -521,12 +572,54 @@ std::string ToolDispatcher::toolGetConfig()
             {"consoleBaudRate", t.consoleBaudRate},
             {"mcuPort", t.mcuPort},
             {"mcuBaudRate", t.mcuBaudRate},
-            {"mcuPollIntervalMs", t.mcuPollIntervalMs}
+            {"mcuPollIntervalMs", t.mcuPollIntervalMs},
+            {"flashing", {
+                {"chip", t.flashing.chip},
+                {"ustImage", t.flashing.ustImage},
+                {"bldImage", t.flashing.bldImage},
+                {"defaultFwImage", t.flashing.defaultFwImage}
+            }}
         });
     }
     j["targets"] = targetsArr;
+    j["flashing"] = {
+        {"usbMatrixBin", cfg.getFlashingGlobalConfig().usbMatrixBin}
+    };
 
     return j.dump(2);
+}
+
+std::string ToolDispatcher::toolFlashTarget(const std::string &target,
+                                           const std::string &chip,
+                                           const std::string &ustImage,
+                                           const std::string &bldImage,
+                                           const std::string &fwImage,
+                                           bool forceUsbBoot,
+                                           int timeoutSec)
+{
+    FlashParams params;
+    params.target = target;
+    params.chip = chip;
+    params.ustImage = ustImage;
+    params.bldImage = bldImage;
+    params.fwImage = fwImage;
+    params.forceUsbBoot = forceUsbBoot;
+    params.timeoutSec = timeoutSec;
+
+    FlashResult res = FlashManager::getInstance().flashTarget(params);
+    return res.toJson().dump(2);
+}
+
+std::string ToolDispatcher::toolUsbListDevices()
+{
+    return FlashManager::getInstance().listUsbDevices().dump(2);
+}
+
+std::string ToolDispatcher::toolFlashGetStatus(const std::string &target)
+{
+    json status = FlashManager::getInstance().getLastResult(target).toJson();
+    status["is_flashing"] = FlashManager::getInstance().isFlashing();
+    return status.dump(2);
 }
 
 } // namespace embdevenv

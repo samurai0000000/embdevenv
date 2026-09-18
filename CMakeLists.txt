@@ -66,6 +66,8 @@ set(SOURCES
     src/Config.cxx
     src/WebServer.cxx
     src/ToolDispatcher.cxx
+    src/UsbMatrixEmbedded.cxx
+    src/FlashManager.cxx
     src/AimonGatewayClient.cxx
     src/StandaloneMcpServer.cxx
 )

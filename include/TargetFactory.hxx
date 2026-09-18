@@ -30,6 +30,14 @@ struct McuConfig {
     int pollIntervalMs = 2000;
 };
 
+struct TargetFlashConfig {
+    bool enabled = true;
+    std::string chip;
+    std::string ustImage;
+    std::string bldImage;
+    std::string defaultFwImage;
+};
+
 struct TargetConfig {
     std::string name;
     std::string model;
@@ -39,6 +47,7 @@ struct TargetConfig {
     // Multi-console & MCU configuration
     std::vector<ConsoleConfig> consoles;
     McuConfig mcu;
+    TargetFlashConfig flashing;
 
     // Backwards-compatible flat fields
     int telnetPort = 0;

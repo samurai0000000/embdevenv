@@ -29,6 +29,10 @@ struct McpConfig {
     int reconnectIntervalSec = 5;
 };
 
+struct FlashingGlobalConfig {
+    std::string usbMatrixBin;
+};
+
 class Config {
 public:
     static Config &getInstance();
@@ -39,6 +43,7 @@ public:
     const std::string &getConfigPath() const;
     const WebConfig &getWebConfig() const;
     const McpConfig &getMcpConfig() const;
+    const FlashingGlobalConfig &getFlashingGlobalConfig() const;
     const std::vector<TargetConfig> &getTargets() const;
 
     void setWebConfig(const WebConfig &web);
@@ -57,6 +62,7 @@ private:
     std::string _configPath;
     WebConfig _webConfig;
     McpConfig _mcpConfig;
+    FlashingGlobalConfig _flashingConfig;
     std::vector<TargetConfig> _targets;
 };
 
