@@ -33,6 +33,7 @@ public:
     bool powerOn() override;
     bool powerOff() override;
     bool reboot() override;
+    bool resetUsbDownload(bool doubleReset = true) override;
     std::string sendCommand(const std::string &cmd, int timeoutMs = 2000) override;
 
     ssize_t write(const char *data, size_t len) override;

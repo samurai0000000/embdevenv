@@ -26,6 +26,7 @@ public:
     virtual bool powerOn() = 0;
     virtual bool powerOff() = 0;
     virtual bool reboot() = 0;
+    virtual bool resetUsbDownload(bool doubleReset = true) = 0;
     virtual std::string sendCommand(const std::string &cmd, int timeoutMs = 2000) = 0;
 
     virtual std::shared_ptr<TelemetryStore> getTelemetryStore() const = 0;

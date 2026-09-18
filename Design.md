@@ -78,7 +78,7 @@ The daemon is implemented under `namespace embdevenv`:
 
 ### 3.3 Network, Web & AI Gateway
 - **`WebServer`**: Embedded HTTP service based on `httplib::Server` hosting the single-page web dashboard and REST API.
-- **`ToolDispatcher`**: Central MCP dispatcher enumerating schemas for 17 tools and routing invocations to `TargetManager` and `Config`.
+- **`ToolDispatcher`**: Central MCP dispatcher enumerating schemas for 18 tools and routing invocations to `TargetManager` and `Config`.
 - **`AimonGatewayClient`**: Resilient TCP client maintaining an asynchronous JSON-RPC 2.0 session with the `aimon` gateway hub, handling capability registration and tool dispatch.
 - **`StandaloneMcpServer`**: Autonomous TCP listener serving MCP JSON-RPC requests for standalone environments without an external gateway.
 - **`Config`**: Singleton configuration parser and serializer built on `libconfig++`.
@@ -144,7 +144,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 | `GET` | `/api/targets/:name/mcu` | MCU connectivity and latest metrics |
 | `GET` | `/api/targets/:name/mcu/telemetry` | Latest telemetry sample JSON |
 | `GET` | `/api/targets/:name/mcu/telemetry/history?count=N` | Telemetry historical series |
-| `POST` | `/api/targets/:name/mcu/power` | Power control: `{"action": "on"\|"off"\|"reboot"}` |
+| `POST` | `/api/targets/:name/mcu/power` | Power control: `{"action": "on"|"off"|"reboot"|"usb_download"}` |
 | `POST` | `/api/targets/:name/mcu/command` | Raw MCU command: `{"command": "bs"}` |
 | `GET` | `/api/targets/:name/console?lines=N` | Recent console log lines |
 | `POST` | `/api/targets/:name/console/write` | Send input string to console |
@@ -154,7 +154,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 
 ## 8. MCP Server & Gateway Integration
 
-`embdevenv` exposes 17 structured tools for AI agent interaction:
+`embdevenv` exposes 18 structured tools for AI agent interaction:
 
 | MCP Tool Name | Description |
 | :--- | :--- |
@@ -163,6 +163,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 | `embdevenv_mcu_power_on` | Power on target hardware via MCU |
 | `embdevenv_mcu_power_off` | Power off target hardware via MCU |
 | `embdevenv_mcu_reboot` | Power cycle / reboot target board via MCU |
+| `embdevenv_mcu_usb_download` | Put target board into USB download / boot mode for flashing |
 | `embdevenv_mcu_get_power_state` | Query whether target is currently ON or OFF |
 | `embdevenv_mcu_get_telemetry` | Retrieve latest telemetry snapshot |
 | `embdevenv_mcu_get_voltages` | Retrieve breakdown of all voltage rails |

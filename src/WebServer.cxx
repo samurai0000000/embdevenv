@@ -190,9 +190,12 @@ void WebServer::setupRoutes()
                 success = target->getMcu()->powerOff();
             } else if (action == "reboot") {
                 success = target->getMcu()->reboot();
+            } else if (action == "usb_download" || action == "usb_boot") {
+                bool doubleReset = body.value("double_reset", true);
+                success = target->getMcu()->resetUsbDownload(doubleReset);
             } else {
                 res.status = 400;
-                res.set_content(R"({"error":"Invalid action, use 'on', 'off', or 'reboot'"})", "application/json");
+                res.set_content(R"({"error":"Invalid action, use 'on', 'off', 'reboot', or 'usb_download'"})", "application/json");
                 return;
             }
 
@@ -634,11 +637,12 @@ std::string WebServer::getDashboardHtml() const
             gap: 0.4rem;
         }
         .btn-group {
-            display: flex;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
             gap: 0.4rem;
         }
         .btn {
-            padding: 0.35rem 0.75rem;
+            padding: 0.35rem 0.5rem;
             border-radius: 6px;
             font-size: 0.8rem;
             font-weight: 600;
@@ -656,6 +660,8 @@ std::string WebServer::getDashboardHtml() const
         .btn-power-off:hover { filter: brightness(1.15); }
         .btn-reboot { background: var(--accent-amber); color: #451a03; }
         .btn-reboot:hover { filter: brightness(1.15); }
+        .btn-usb-boot { background: var(--accent-indigo); color: #ffffff; }
+        .btn-usb-boot:hover { filter: brightness(1.15); }
         .btn-secondary { background: #22304d; color: var(--text-main); border: 1px solid var(--border); }
         .btn-secondary:hover { background: #2d3e63; }
         .btn-active { background: var(--accent-cyan); color: #050811; }
@@ -948,6 +954,7 @@ std::string WebServer::getDashboardHtml() const
                         <button class="btn btn-power-on" onclick="controlPower('on')">&#x25B6; Power ON</button>
                         <button class="btn btn-power-off" onclick="requestPowerOff()">&#x25A0; Power OFF</button>
                         <button class="btn btn-reboot" onclick="requestReboot()">&#x21BB; Reboot</button>
+                        <button class="btn btn-usb-boot" onclick="requestUsbBoot()">&#x1F50C; USB Boot</button>
                     </div>
                     <div>
                         <div class="meta-row">
@@ -1086,6 +1093,16 @@ std::string WebServer::getDashboardHtml() const
             const btn = document.getElementById('modalConfirmBtn');
             btn.className = 'btn btn-reboot';
             btn.textContent = 'Reboot Target';
+            document.getElementById('safetyModal').style.display = 'flex';
+        }
+
+        function requestUsbBoot() {
+            pendingPowerAction = 'usb_download';
+            document.getElementById('modalTitle').innerHTML = '&#x1F50C; Enter USB Download Mode';
+            document.getElementById('modalDesc').textContent = `Are you sure you want to put target "${activeTarget}" into USB download mode for flashing? The SoC will reboot into USB bootloader mode.`;
+            const btn = document.getElementById('modalConfirmBtn');
+            btn.className = 'btn btn-usb-boot';
+            btn.textContent = 'Enter USB Boot';
             document.getElementById('safetyModal').style.display = 'flex';
         }
 

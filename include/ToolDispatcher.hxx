@@ -23,6 +23,7 @@ private:
     static std::string toolMcuPowerOn(const std::string &target);
     static std::string toolMcuPowerOff(const std::string &target);
     static std::string toolMcuReboot(const std::string &target);
+    static std::string toolMcuUsbDownload(const std::string &target, bool doubleReset);
     static std::string toolMcuGetPowerState(const std::string &target);
     static std::string toolMcuGetTelemetry(const std::string &target);
     static std::string toolMcuGetVoltages(const std::string &target);

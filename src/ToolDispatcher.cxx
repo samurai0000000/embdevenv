@@ -69,6 +69,18 @@ json ToolDispatcher::getToolDefinitions()
             }}
         },
         {
+            {"name", "embdevenv_mcu_usb_download"},
+            {"description", "Put target board into USB download / boot mode for firmware flashing via MCU command 'reset -usb -y'."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"double_reset", {{"type", "boolean"}, {"description", "Send command twice to avoid MCU state-latching (default: true)"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
+        },
+        {
             {"name", "embdevenv_mcu_get_power_state"},
             {"description", "Check whether target board is currently powered ON or OFF."},
             {"inputSchema", {
@@ -228,6 +240,9 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return toolMcuPowerOff(target);
     } else if (name == "embdevenv_mcu_reboot") {
         return toolMcuReboot(target);
+    } else if (name == "embdevenv_mcu_usb_download") {
+        bool doubleReset = args.value("double_reset", true);
+        return toolMcuUsbDownload(target, doubleReset);
     } else if (name == "embdevenv_mcu_get_power_state") {
         return toolMcuGetPowerState(target);
     } else if (name == "embdevenv_mcu_get_telemetry") {
@@ -304,6 +319,22 @@ std::string ToolDispatcher::toolMcuReboot(const std::string &targetName)
     }
     bool ok = target->getMcu()->reboot();
     json resp = {{"success", ok}, {"target", targetName}, {"action", "reboot"}};
+    return resp.dump(2);
+}
+
+std::string ToolDispatcher::toolMcuUsbDownload(const std::string &targetName, bool doubleReset)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    if (!target || !target->getMcu()) {
+        return "Error: Target or MCU not found for '" + targetName + "'";
+    }
+    bool ok = target->getMcu()->resetUsbDownload(doubleReset);
+    json resp = {
+        {"success", ok},
+        {"target", targetName},
+        {"action", "usb_download"},
+        {"double_reset", doubleReset}
+    };
     return resp.dump(2);
 }
 

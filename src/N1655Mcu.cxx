@@ -268,6 +268,20 @@ bool N1655Mcu::reboot()
     return !resp.empty();
 }
 
+bool N1655Mcu::resetUsbDownload(bool doubleReset)
+{
+    std::string resp = sendCommand("reset -usb -y", 3000);
+    if (resp.empty()) {
+        return false;
+    }
+    if (doubleReset) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        resp = sendCommand("reset -usb -y", 3000);
+        return !resp.empty();
+    }
+    return true;
+}
+
 bool N1655Mcu::parseTelemetryBlock(const std::string &block, TelemetrySample &sample)
 {
     auto now = std::chrono::system_clock::now();

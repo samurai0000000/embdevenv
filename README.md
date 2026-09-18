@@ -10,7 +10,7 @@
 - **Telnet Console Demultiplexing**: Multiple human operators or automation scripts can connect concurrently to target UART consoles via dedicated Telnet ports.
 - **Modern Web Dashboard**: Responsive dark-mode single-page web interface with real-time target switching, live telemetry visualization, power control, and interactive terminal output.
 - **RESTful Management API**: JSON endpoints for remote automated querying, telemetry history extraction, and power cycle sequences.
-- **Dual MCP Integration**: Seamlessly exports 17 structured tools to the `aimon` gateway hub over TCP JSON-RPC 2.0, or operates as a standalone MCP server.
+- **Dual MCP Integration**: Seamlessly exports 18 structured tools to the `aimon` gateway hub over TCP JSON-RPC 2.0, or operates as a standalone MCP server.
 - **Structured Configuration**: Complete configuration management powered by `libconfig++`.
 
 ## Getting Started
