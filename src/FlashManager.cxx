@@ -11,6 +11,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sys/select.h>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -99,19 +101,58 @@ std::string FlashManager::ensureUsbMatrixBinary()
     return _cachedBinaryPath;
 }
 
-std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, int timeoutSec)
+std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, int timeoutSec, std::function<void(const std::string&)> onOutput)
 {
-    std::string fullCmd = "timeout " + std::to_string(timeoutSec > 0 ? timeoutSec : 60) + " " + cmd + " 2>&1";
+    std::string fullCmd = "timeout -k 5s " + std::to_string(timeoutSec > 0 ? timeoutSec : 60) + " " + cmd + " 2>&1";
     FILE *fp = popen(fullCmd.c_str(), "r");
     if (!fp) {
         exitCode = -1;
         return "Failed to run command: " + cmd;
     }
 
+    int fd = fileno(fp);
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
     std::string output;
     char buf[512];
-    while (fgets(buf, sizeof(buf), fp) != nullptr) {
-        output += buf;
+    auto startTime = std::chrono::steady_clock::now();
+    int timeoutMs = (timeoutSec > 0 ? timeoutSec : 60) * 1000 + 5000;
+
+    while (true) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(fd, &read_fds);
+
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+
+        int ret = select(fd + 1, &read_fds, nullptr, nullptr, &tv);
+        if (ret > 0) {
+            ssize_t bytesRead = read(fd, buf, sizeof(buf) - 1);
+            if (bytesRead > 0) {
+                buf[bytesRead] = '\0';
+                output += buf;
+                if (onOutput) onOutput(output);
+            } else if (bytesRead == 0) {
+                break; // EOF
+            } else {
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    break;
+                }
+            }
+        } else if (ret == 0) {
+            auto now = std::chrono::steady_clock::now();
+            int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
+            if (elapsedMs >= timeoutMs) {
+                output += "\n[embdevenv] executeCommand pipe read timeout exceeded.\n";
+                if (onOutput) onOutput(output);
+                break; // Break the blocking read!
+            }
+        } else {
+            if (errno != EINTR) break;
+        }
     }
 
     int status = pclose(fp);
@@ -120,7 +161,6 @@ std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, 
     } else {
         exitCode = -1;
     }
-
     return output;
 }
 
@@ -201,8 +241,6 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     };
 
     updateState("preflight");
-
-    auto startTime = std::chrono::steady_clock::now();
 
     // 1. Pre-flight checks & resolve target defaults
     auto targetObj = TargetManager::getInstance().getTarget(params.target);
@@ -299,7 +337,15 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     cmd += " -f \"" + fwImage + "\"";
 
     int exitCode = 0;
-    std::string log = executeCommand(cmd, exitCode, params.timeoutSec);
+    auto startTime = std::chrono::steady_clock::now();
+    
+    auto outputCallback = [&](const std::string &log) {
+        result.usbMatrixLog = log;
+        std::lock_guard<std::mutex> mlock(_mutex);
+        _lastResult = result;
+    };
+    
+    std::string log = executeCommand(cmd, exitCode, params.timeoutSec, outputCallback);
     result.usbMatrixLog = log;
 
     auto endTime = std::chrono::steady_clock::now();

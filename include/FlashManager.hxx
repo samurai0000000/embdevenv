@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 namespace embdevenv {
@@ -57,7 +58,7 @@ private:
     FlashManager(const FlashManager &) = delete;
     FlashManager &operator=(const FlashManager &) = delete;
 
-    std::string executeCommand(const std::string &cmd, int &exitCode, int timeoutSec = 60);
+    std::string executeCommand(const std::string &cmd, int &exitCode, int timeoutSec = 60, std::function<void(const std::string&)> onOutput = nullptr);
 
     mutable std::mutex _mutex;
     std::atomic<bool> _isFlashing;
