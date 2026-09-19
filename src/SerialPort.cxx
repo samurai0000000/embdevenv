@@ -395,8 +395,11 @@ ssize_t SerialPort::write(const char *data, size_t len)
         std::lock_guard<std::mutex> lock(_lifecycleMutex);
         fd = _fd;
     }
-    if (fd < 0 || data == nullptr || len == 0) {
+    if (fd < 0 || data == nullptr) {
         return -1;
+    }
+    if (len == 0) {
+        return 0;
     }
 
     std::lock_guard<std::mutex> lock(_writeMutex);

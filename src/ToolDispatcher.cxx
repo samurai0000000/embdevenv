@@ -194,11 +194,14 @@ json ToolDispatcher::getToolDefinitions()
                 {"type", "object"},
                 {"properties", {
                     {"target", {{"type", "string"}, {"description", "Target name"}}},
-                    {"data", {{"type", "string"}, {"description", "Data or command to write"}}},
+                    {"data", {{"type", "string"}, {"description", "Data or command to write (aliases: 'input', 'command', 'text')"}}},
+                    {"input", {{"type", "string"}, {"description", "Alias for 'data'"}}},
+                    {"command", {{"type", "string"}, {"description", "Alias for 'data'"}}},
+                    {"text", {{"type", "string"}, {"description", "Alias for 'data'"}}},
                     {"char_delay_ms", {{"type", "integer"}, {"description", "Inter-character pacing delay in ms to avoid UART buffer overflow (default: 0)"}}},
                     {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
                 }},
-                {"required", json::array({"target", "data"})}
+                {"required", json::array({"target"})}
             }}
         },
         {
@@ -398,6 +401,15 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return toolConsoleRead(target, lines, console);
     } else if (name == "embdevenv_console_write") {
         std::string data = args.value("data", "");
+        if (data.empty() && args.contains("input") && args["input"].is_string()) {
+            data = args["input"].get<std::string>();
+        }
+        if (data.empty() && args.contains("command") && args["command"].is_string()) {
+            data = args["command"].get<std::string>();
+        }
+        if (data.empty() && args.contains("text") && args["text"].is_string()) {
+            data = args["text"].get<std::string>();
+        }
         int charDelayMs = args.value("char_delay_ms", 0);
         std::string console = args.value("console", "");
         return toolConsoleWrite(target, data, charDelayMs, console);
@@ -413,6 +425,12 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return toolConsoleCatchBootloader(target, prompt, interruptKey, timeoutSec, rebootFirst, console);
     } else if (name == "embdevenv_console_expect") {
         std::string command = args.value("command", "");
+        if (command.empty() && args.contains("input") && args["input"].is_string()) {
+            command = args["input"].get<std::string>();
+        }
+        if (command.empty() && args.contains("data") && args["data"].is_string()) {
+            command = args["data"].get<std::string>();
+        }
         std::vector<std::string> patterns;
         if (args.contains("wait_for") && args["wait_for"].is_array()) {
             for (const auto &p : args["wait_for"]) {
@@ -636,6 +654,17 @@ std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, cons
     auto console = resolveTargetConsole(target, consoleName);
     if (!target || !console) {
         return "Error: Console not available for '" + targetName + "'";
+    }
+
+    if (data.empty()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"bytesWritten", 0},
+            {"error", "No data provided to write. Please specify 'data' or 'input' parameter."}
+        };
+        return j.dump(2);
     }
 
     std::string processed = data;

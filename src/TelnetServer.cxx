@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <cstring>
 #include <cstdio>
+#include <cctype>
 #include <algorithm>
 
 namespace embdevenv {
@@ -164,6 +165,26 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
             }
         } else if (c == '\0') {
             // Telnet CR-NUL or null byte filtering
+            ++i;
+        } else if (c == 0x1b && i + 1 < len && buf[i + 1] == '[') {
+            // Check for automated terminal emulator responses such as:
+            // - Cursor Position Report (CPR): \x1b[<row>;<col>R or \x1b[<row>R
+            // - Device Attributes (DA): \x1b[?<attrs>c or \x1b[<attrs>c
+            size_t j = i + 2;
+            if (j < len && buf[j] == '?') {
+                ++j;
+            }
+            size_t startDigits = j;
+            while (j < len && (std::isdigit(static_cast<unsigned char>(buf[j])) || buf[j] == ';')) {
+                ++j;
+            }
+            if (j > startDigits && j < len && (buf[j] == 'R' || buf[j] == 'c')) {
+                // Drop automated terminal emulator response (e.g. \x1b[28R, \x1b[20R)
+                // so it does not corrupt the target's serial console input.
+                i = j + 1;
+                continue;
+            }
+            cleanData += static_cast<char>(c);
             ++i;
         } else {
             cleanData += static_cast<char>(c);

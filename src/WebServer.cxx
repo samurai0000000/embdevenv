@@ -7,6 +7,7 @@
 #include "WebServer.hxx"
 #include "TargetManager.hxx"
 #include "FlashManager.hxx"
+#include "UsageDatabase.hxx"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <cstdio>
@@ -350,6 +351,46 @@ void WebServer::setupRoutes()
             }
         }
         res.set_content(target->getMcu()->getTelemetryStore()->toJson(count).dump(2), "application/json");
+    });
+
+    // Target board usage statistics
+    _server->Get(R"(/api/targets/([^/]+)/stats)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string name = req.matches[1];
+        auto target = TargetManager::getInstance().getTarget(name);
+        if (!target) {
+            res.status = 404;
+            res.set_content(R"({"error":"Target not found"})", "application/json");
+            return;
+        }
+        int windowDays = 30;
+        if (req.has_param("window")) {
+            try {
+                windowDays = std::stoi(req.get_param_value("window"));
+            } catch (...) {
+            }
+        }
+        nlohmann::json stats = UsageDatabase::getInstance().queryBoardStats(name, windowDays);
+        res.set_content(stats.dump(2), "application/json");
+    });
+
+    // Target board recent lifecycle events
+    _server->Get(R"(/api/targets/([^/]+)/events)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string name = req.matches[1];
+        auto target = TargetManager::getInstance().getTarget(name);
+        if (!target) {
+            res.status = 404;
+            res.set_content(R"({"error":"Target not found"})", "application/json");
+            return;
+        }
+        int limit = 50;
+        if (req.has_param("limit")) {
+            try {
+                limit = std::stoi(req.get_param_value("limit"));
+            } catch (...) {
+            }
+        }
+        nlohmann::json events = UsageDatabase::getInstance().queryRecentEvents(name, limit);
+        res.set_content(events.dump(2), "application/json");
     });
 
     // Target MCU power control
@@ -833,6 +874,246 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                 grid-template-columns: 1fr;
             }
         }
+        /* Board Statistics GUI Card */
+        .board-stats-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            margin-top: 0.25rem;
+        }
+        .stats-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.75rem;
+        }
+        .stats-window-group {
+            display: inline-flex;
+            background: #0d1424;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 2px;
+            gap: 2px;
+        }
+        .window-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 0.25rem 0.65rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .window-btn:hover {
+            color: var(--text-main);
+            background: rgba(255,255,255,0.05);
+        }
+        .window-btn.active {
+            color: var(--accent-cyan);
+            background: rgba(6,182,212,0.15);
+            box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+        }
+        .stats-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.75rem;
+        }
+        @media (max-width: 1024px) {
+            .stats-kpi-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        @media (max-width: 600px) {
+            .stats-kpi-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .stat-kpi-card {
+            background: #0d1424;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            transition: border-color 0.2s;
+        }
+        .stat-kpi-card:hover {
+            border-color: rgba(6,182,212,0.4);
+        }
+        .stat-kpi-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .stat-kpi-val {
+            font-size: 1.6rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-main);
+            line-height: 1.2;
+        }
+        .stat-kpi-sub {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .stats-visual-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+        }
+        @media (max-width: 768px) {
+            .stats-visual-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        .health-card {
+            background: #0d1424;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .health-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .health-bar-track {
+            height: 8px;
+            background: rgba(255,255,255,0.06);
+            border-radius: 9999px;
+            overflow: hidden;
+            position: relative;
+        }
+        .health-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-cyan), var(--accent-emerald));
+            border-radius: 9999px;
+            transition: width 0.4s ease;
+        }
+        .health-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+        }
+        .temp-envelope-track {
+            height: 8px;
+            background: linear-gradient(90deg, #10b981 0%, #06b6d4 50%, #f59e0b 75%, #f43f5e 100%);
+            border-radius: 9999px;
+            position: relative;
+            opacity: 0.85;
+        }
+        .temp-envelope-bar {
+            position: absolute;
+            top: -2px;
+            bottom: -2px;
+            background: white;
+            border-radius: 4px;
+            box-shadow: 0 0 6px rgba(255,255,255,0.8);
+            transition: all 0.4s ease;
+            width: 8px;
+            left: 50%;
+        }
+        .events-container {
+            background: #0d1424;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+        }
+        .events-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .events-filter-group {
+            display: flex;
+            gap: 0.35rem;
+        }
+        .filter-chip {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 0.2rem 0.55rem;
+            font-size: 0.72rem;
+            font-weight: 600;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .filter-chip:hover {
+            color: var(--text-main);
+            border-color: rgba(255,255,255,0.2);
+        }
+        .filter-chip.active {
+            color: var(--accent-cyan);
+            background: rgba(6,182,212,0.12);
+            border-color: var(--accent-cyan);
+        }
+        .events-table-wrapper {
+            max-height: 260px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+        }
+        .events-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+            text-align: left;
+        }
+        .events-table th {
+            background: #111827;
+            color: var(--text-muted);
+            font-weight: 600;
+            padding: 0.45rem 0.65rem;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        .events-table td {
+            padding: 0.4rem 0.65rem;
+            border-bottom: 1px solid rgba(35,47,72,0.4);
+            color: var(--text-main);
+            font-variant-numeric: tabular-nums;
+        }
+        .events-table tr:nth-child(even) td {
+            background: rgba(255,255,255,0.015);
+        }
+        .events-table tr:hover td {
+            background: rgba(6,182,212,0.05);
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        .spinning { animation: spin 0.6s linear infinite; }
         .console-card {
             background: var(--bg-card);
             border: 1px solid var(--border);
@@ -1353,6 +1634,133 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                 </div>
             </div>
         </div>
+
+        <!-- Board Statistics GUI Card (Carried by Active Board) -->
+        <div class="card board-stats-card" id="boardStatsCard">
+            <!-- Header Bar: Board Name, Health Badge, Window Selector, Refresh -->
+            <div class="stats-header">
+                <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
+                    <span class="card-title">&#x1F4CA; <span id="statsBoardName">Target</span> Statistics &amp; Lifecycle Health</span>
+                    <span class="status-pill" style="font-size:0.7rem; background:rgba(6,182,212,0.1); color:var(--accent-cyan); border-color:rgba(6,182,212,0.25);">SQLite WAL</span>
+                </div>
+
+                <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
+                    <div class="stats-window-group">
+                        <button class="window-btn" data-days="1" onclick="setStatsWindow(1)">24h</button>
+                        <button class="window-btn" data-days="7" onclick="setStatsWindow(7)">7d</button>
+                        <button class="window-btn active" data-days="30" onclick="setStatsWindow(30)">30d</button>
+                        <button class="window-btn" data-days="365" onclick="setStatsWindow(365)">1y</button>
+                        <button class="window-btn" data-days="0" onclick="setStatsWindow(0)">All</button>
+                    </div>
+                    <button id="statsRefreshBtn" class="btn btn-secondary" style="padding:0.25rem 0.6rem; font-size:0.75rem;" onclick="refreshStats()" title="Refresh board statistics">&#x21BB; Refresh</button>
+                </div>
+            </div>
+
+            <!-- Section 1: KPI Summary Metric Cards -->
+            <div class="stats-kpi-grid">
+                <!-- Flashes KPI -->
+                <div class="stat-kpi-card">
+                    <div class="stat-kpi-label">&#x26A1; Firmware Flashes</div>
+                    <div class="stat-kpi-val" id="kpiFlashesTotal">--</div>
+                    <div class="stat-kpi-sub">
+                        <span id="kpiFlashRateBadge" class="status-pill" style="font-size:0.7rem;">--%</span>
+                        <span id="kpiFlashesLifetime" style="color:var(--text-muted); font-size:0.75rem;">-- lifetime</span>
+                    </div>
+                </div>
+
+                <!-- Power & Reboots KPI -->
+                <div class="stat-kpi-card">
+                    <div class="stat-kpi-label">&#x1F50C; Power &amp; Lifecycle</div>
+                    <div class="stat-kpi-val" id="kpiPowerCycles">--</div>
+                    <div class="stat-kpi-sub">
+                        <span id="kpiRebootsTotal" style="color:var(--accent-indigo); font-weight:600;">--</span>
+                        <span style="color:var(--text-muted); font-size:0.75rem;">reboots (<span id="kpiRebootsLifetime">--</span> lifetime)</span>
+                    </div>
+                </div>
+
+                <!-- Intercept & Recovery KPI -->
+                <div class="stat-kpi-card">
+                    <div class="stat-kpi-label">&#x1F6E1;&#xFE0F; Intercept &amp; Recovery</div>
+                    <div class="stat-kpi-val" id="kpiCatches">--</div>
+                    <div class="stat-kpi-sub">
+                        <span id="kpiUsbDownloads" style="color:var(--accent-amber); font-weight:600;">--</span>
+                        <span style="color:var(--text-muted); font-size:0.75rem;">USB recovery boots</span>
+                    </div>
+                </div>
+
+                <!-- Thermal Profile KPI -->
+                <div class="stat-kpi-card">
+                    <div class="stat-kpi-label">&#x1F321;&#xFE0F; Thermal &amp; Cooling</div>
+                    <div class="stat-kpi-val" id="kpiAvgTemp">-- &deg;C</div>
+                    <div class="stat-kpi-sub">
+                        <span id="kpiMaxTemp" style="color:var(--accent-rose); font-weight:600;">Peak -- &deg;C</span>
+                        <span id="kpiAvgFan" style="color:var(--text-muted); font-size:0.75rem;">Fan -- RPM</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 2: Wear & Thermal Health Visual Gauges -->
+            <div class="stats-visual-grid">
+                <!-- eMMC Flash Wear Gauge -->
+                <div class="health-card">
+                    <div class="health-header">
+                        <span style="font-size:0.8rem; font-weight:600;">eMMC Flash Write Stress</span>
+                        <span id="flashWearPercent" style="font-size:0.8rem; color:var(--accent-cyan); font-weight:bold;">0.0%</span>
+                    </div>
+                    <div class="health-bar-track">
+                        <div id="flashWearBar" class="health-bar-fill" style="width: 1%;"></div>
+                    </div>
+                    <div class="health-footer">
+                        <span>Low Wear (Nominal endurance: 10,000 cycles)</span>
+                        <span id="flashWearCount">-- / 10,000</span>
+                    </div>
+                </div>
+
+                <!-- Thermal Operating Envelope -->
+                <div class="health-card">
+                    <div class="health-header">
+                        <span style="font-size:0.8rem; font-weight:600;">Thermal Operating Envelope</span>
+                        <span id="thermalStatusPill" class="status-pill" style="font-size:0.7rem;">Nominal</span>
+                    </div>
+                    <div class="temp-envelope-track">
+                        <div id="tempEnvelopeBar" class="temp-envelope-bar"></div>
+                    </div>
+                    <div class="health-footer">
+                        <span id="thermalMinMax">Min: -- &deg;C | Max: -- &deg;C</span>
+                        <span>Safe Ceiling: 80 &deg;C</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Section 3: Recent Lifecycle Events Audit Log -->
+            <div class="events-container">
+                <div class="events-toolbar">
+                    <span style="font-size:0.85rem; font-weight:600;">Recent Lifecycle Events (<span id="eventsTargetLabel">-</span>)</span>
+                    <div class="events-filter-group">
+                        <button class="filter-chip active" data-filter="all" onclick="filterEvents('all')">All</button>
+                        <button class="filter-chip" data-filter="flash" onclick="filterEvents('flash')">Flashes</button>
+                        <button class="filter-chip" data-filter="reboot" onclick="filterEvents('reboot')">Reboots</button>
+                        <button class="filter-chip" data-filter="catch" onclick="filterEvents('bootloader_catch')">Catches</button>
+                    </div>
+                </div>
+                <div class="events-table-wrapper">
+                    <table class="events-table">
+                        <thead>
+                            <tr>
+                                <th style="width:160px;">Timestamp</th>
+                                <th style="width:130px;">Event</th>
+                                <th style="width:90px;">Status</th>
+                                <th style="width:90px;">Duration</th>
+                                <th>Context / Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eventsTableBody">
+                            <tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:1rem;">Loading events...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </main>
 
     <!-- Safety Confirmation Modal -->
@@ -1437,6 +1845,9 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
         let frozenBuffer = [];
         let rawLogLines = [];
         let pendingPowerAction = null;
+        let statsWindowDays = 30;
+        let currentBoardEvents = [];
+        let currentEventFilter = 'all';
 
         function updateClock() {
             const now = new Date();
@@ -2181,9 +2592,15 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
             activeTarget = name;
             activeConsole = '';
             renderTabs();
+            const bName = document.getElementById('statsBoardName');
+            if (bName) bName.textContent = name;
+            const eLabel = document.getElementById('eventsTargetLabel');
+            if (eLabel) eLabel.textContent = name;
             pollActiveTarget().then(() => {
                 connectWebSocket();
             });
+            loadBoardStats(name);
+            loadBoardEvents(name);
         }
 
         function updateConsolesDropdown(consoles) {
@@ -2345,10 +2762,211 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
             }
         }
 
+        function setStatsWindow(days) {
+            statsWindowDays = days;
+            document.querySelectorAll('.window-btn').forEach(btn => {
+                btn.classList.toggle('active', parseInt(btn.dataset.days) === days);
+            });
+            if (activeTarget) {
+                loadBoardStats(activeTarget);
+            }
+        }
+
+        async function loadBoardStats(targetName) {
+            if (!targetName) return;
+            try {
+                const res = await fetch(`/api/targets/${encodeURIComponent(targetName)}/stats?window=${statsWindowDays}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const summary = data.summary || {};
+                const lifetime = data.lifetime_totals || {};
+
+                // 1. Firmware flashes
+                const flashesTotal = summary.flashes_total || 0;
+                const flashesLifetime = lifetime.flashes_total || 0;
+                const successRate = summary.flash_success_rate !== undefined ? (summary.flash_success_rate * 100) : 100.0;
+
+                const fTotalEl = document.getElementById('kpiFlashesTotal');
+                if (fTotalEl) fTotalEl.textContent = flashesTotal;
+                const fLifeEl = document.getElementById('kpiFlashesLifetime');
+                if (fLifeEl) fLifeEl.textContent = `${flashesLifetime} lifetime`;
+                const rateBadge = document.getElementById('kpiFlashRateBadge');
+                if (rateBadge) {
+                    rateBadge.textContent = `${successRate.toFixed(1)}%`;
+                    if (successRate >= 90) {
+                        rateBadge.style.background = 'rgba(16,185,129,0.15)';
+                        rateBadge.style.color = 'var(--accent-emerald)';
+                        rateBadge.style.borderColor = 'rgba(16,185,129,0.3)';
+                    } else if (successRate >= 70) {
+                        rateBadge.style.background = 'rgba(245,158,11,0.15)';
+                        rateBadge.style.color = 'var(--accent-amber)';
+                        rateBadge.style.borderColor = 'rgba(245,158,11,0.3)';
+                    } else {
+                        rateBadge.style.background = 'rgba(244,63,94,0.15)';
+                        rateBadge.style.color = 'var(--accent-rose)';
+                        rateBadge.style.borderColor = 'rgba(244,63,94,0.3)';
+                    }
+                }
+
+                // 2. Power & Reboots
+                const pCycles = summary.power_cycles_total || 0;
+                const reboots = summary.reboots_total || 0;
+                const rebootsLifetime = lifetime.reboots_total || 0;
+                const pCyclesEl = document.getElementById('kpiPowerCycles');
+                if (pCyclesEl) pCyclesEl.textContent = pCycles;
+                const rTotalEl = document.getElementById('kpiRebootsTotal');
+                if (rTotalEl) rTotalEl.textContent = reboots;
+                const rLifeEl = document.getElementById('kpiRebootsLifetime');
+                if (rLifeEl) rLifeEl.textContent = rebootsLifetime;
+
+                // 3. Intercept & Recovery
+                const catches = summary.bootloader_catches_total || 0;
+                const usbDown = summary.usb_downloads_total || 0;
+                const catchesEl = document.getElementById('kpiCatches');
+                if (catchesEl) catchesEl.textContent = catches;
+                const usbEl = document.getElementById('kpiUsbDownloads');
+                if (usbEl) usbEl.textContent = usbDown;
+
+                // 4. Thermal & Fan
+                const avgTemp = summary.avg_temp_c || 0.0;
+                const maxTemp = summary.max_temp_c || 0.0;
+                const minTemp = summary.min_temp_c || 0.0;
+                const avgFan = summary.avg_fan_rpm || 0.0;
+
+                const avgTempEl = document.getElementById('kpiAvgTemp');
+                if (avgTempEl) avgTempEl.innerHTML = (avgTemp > 0 ? avgTemp.toFixed(1) : '--') + ' &deg;C';
+                const maxTempEl = document.getElementById('kpiMaxTemp');
+                if (maxTempEl) maxTempEl.innerHTML = (maxTemp > 0 ? `Peak ${maxTemp.toFixed(1)} &deg;C` : 'Peak -- &deg;C');
+                const avgFanEl = document.getElementById('kpiAvgFan');
+                if (avgFanEl) avgFanEl.textContent = (avgFan > 0 ? `Fan ${Math.round(avgFan)} RPM` : 'Fan -- RPM');
+
+                // 5. eMMC Flash Wear Gauge (Nominal 10,000 P/E cycles)
+                const nominalCycles = 10000;
+                const wearPercent = Math.min(100, Math.max(0.01, (flashesLifetime / nominalCycles) * 100));
+                const wearPercentEl = document.getElementById('flashWearPercent');
+                if (wearPercentEl) wearPercentEl.textContent = `${wearPercent.toFixed(2)}%`;
+                const wearBar = document.getElementById('flashWearBar');
+                if (wearBar) wearBar.style.width = `${Math.max(1, wearPercent)}%`;
+                const wearCountEl = document.getElementById('flashWearCount');
+                if (wearCountEl) wearCountEl.textContent = `${flashesLifetime} / ${nominalCycles.toLocaleString()}`;
+
+                // 6. Thermal Operating Envelope
+                const minMaxText = (minTemp > 0 && maxTemp > 0) ? `Min: ${minTemp.toFixed(1)}°C | Max: ${maxTemp.toFixed(1)}°C` : 'Min: -- °C | Max: -- °C';
+                const thermalMinMaxEl = document.getElementById('thermalMinMax');
+                if (thermalMinMaxEl) thermalMinMaxEl.textContent = minMaxText;
+                const thermalPill = document.getElementById('thermalStatusPill');
+                if (thermalPill) {
+                    if (maxTemp > 75) {
+                        thermalPill.textContent = 'High Temp';
+                        thermalPill.style.background = 'rgba(244,63,94,0.15)';
+                        thermalPill.style.color = 'var(--accent-rose)';
+                        thermalPill.style.borderColor = 'rgba(244,63,94,0.3)';
+                    } else if (maxTemp > 60) {
+                        thermalPill.textContent = 'Warm';
+                        thermalPill.style.background = 'rgba(245,158,11,0.15)';
+                        thermalPill.style.color = 'var(--accent-amber)';
+                        thermalPill.style.borderColor = 'rgba(245,158,11,0.3)';
+                    } else {
+                        thermalPill.textContent = 'Nominal';
+                        thermalPill.style.background = 'rgba(16,185,129,0.15)';
+                        thermalPill.style.color = 'var(--accent-emerald)';
+                        thermalPill.style.borderColor = 'rgba(16,185,129,0.3)';
+                    }
+                }
+
+                // Envelope marker position: 0°C (0%) to 100°C (100%)
+                const clampTemp = Math.min(100, Math.max(0, avgTemp > 0 ? avgTemp : 25));
+                const envBar = document.getElementById('tempEnvelopeBar');
+                if (envBar) envBar.style.left = `calc(${clampTemp}% - 4px)`;
+            } catch (err) {
+                console.error('Failed to load board stats', err);
+            }
+        }
+
+        async function loadBoardEvents(targetName) {
+            if (!targetName) return;
+            try {
+                const res = await fetch(`/api/targets/${encodeURIComponent(targetName)}/events?limit=30`);
+                if (!res.ok) return;
+                currentBoardEvents = await res.json();
+                renderBoardEvents();
+            } catch (err) {
+                console.error('Failed to load board events', err);
+            }
+        }
+
+        function filterEvents(type) {
+            currentEventFilter = type;
+            document.querySelectorAll('.filter-chip').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.filter === type);
+            });
+            renderBoardEvents();
+        }
+
+        function renderBoardEvents() {
+            const tbody = document.getElementById('eventsTableBody');
+            if (!tbody) return;
+
+            let filtered = currentBoardEvents || [];
+            if (currentEventFilter === 'flash') {
+                filtered = filtered.filter(e => e.event_type === 'flash');
+            } else if (currentEventFilter === 'reboot') {
+                filtered = filtered.filter(e => e.event_type === 'reboot' || e.event_type === 'power_on' || e.event_type === 'power_off');
+            } else if (currentEventFilter === 'bootloader_catch') {
+                filtered = filtered.filter(e => e.event_type === 'bootloader_catch');
+            }
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:1rem;">No events recorded in this category.</td></tr>';
+                return;
+            }
+
+            let html = '';
+            filtered.forEach(ev => {
+                const dateStr = new Date(ev.timestamp * 1000).toISOString().replace('T', ' ').substring(0, 19);
+                const isSuccess = ev.status === 'success';
+                const statusBadge = isSuccess
+                    ? '<span class="status-pill" style="font-size:0.68rem; padding:0.1rem 0.45rem; background:rgba(16,185,129,0.15); color:var(--accent-emerald); border-color:rgba(16,185,129,0.3)">SUCCESS</span>'
+                    : `<span class="status-pill" style="font-size:0.68rem; padding:0.1rem 0.45rem; background:rgba(244,63,94,0.15); color:var(--accent-rose); border-color:rgba(244,63,94,0.3)">${(ev.status || 'FAILED').toUpperCase()}</span>`;
+                const durationStr = ev.duration_ms > 0 ? (ev.duration_ms > 1000 ? (ev.duration_ms / 1000).toFixed(1) + 's' : ev.duration_ms + 'ms') : '-';
+                const safeDetails = (ev.details || '-').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+                let typeIcon = '&#x25C6;';
+                if (ev.event_type === 'flash') typeIcon = '&#x26A1;';
+                else if (ev.event_type === 'reboot') typeIcon = '&#x21BB;';
+                else if (ev.event_type === 'power_on' || ev.event_type === 'power_off') typeIcon = '&#x1F50C;';
+                else if (ev.event_type === 'bootloader_catch') typeIcon = '&#x1F6E1;&#xFE0F;';
+                else if (ev.event_type === 'usb_download') typeIcon = '&#x1F4BE;';
+
+                html += `<tr>
+                    <td style="font-family:monospace; color:var(--text-muted);">${dateStr}</td>
+                    <td><span style="margin-right:0.3rem;">${typeIcon}</span><b>${ev.event_type}</b></td>
+                    <td>${statusBadge}</td>
+                    <td style="font-family:monospace;">${durationStr}</td>
+                    <td style="font-family:monospace; color:var(--text-muted); word-break:break-all;">${safeDetails}</td>
+                </tr>`;
+            });
+            tbody.innerHTML = html;
+        }
+
+        async function refreshStats() {
+            if (!activeTarget) return;
+            const btn = document.getElementById('statsRefreshBtn');
+            if (btn) btn.classList.add('spinning');
+            await Promise.all([loadBoardStats(activeTarget), loadBoardEvents(activeTarget)]);
+            if (btn) btn.classList.remove('spinning');
+        }
+
         // Initialize components on load
         initTerminal();
         fetchTargets();
         setInterval(pollActiveTarget, 2000);
+        setInterval(() => {
+            if (activeTarget) {
+                loadBoardStats(activeTarget);
+                loadBoardEvents(activeTarget);
+            }
+        }, 15000);
     </script>
 </body>
 </html>

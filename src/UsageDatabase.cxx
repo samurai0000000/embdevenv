@@ -323,9 +323,12 @@ nlohmann::json UsageDatabase::queryBoardStats(const std::string &boardName, int 
     root["target"] = boardName;
     root["window_days"] = windowDays;
 
-    int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    int64_t windowStart = now - (static_cast<int64_t>(windowDays) * 86400);
+    int64_t windowStart = 0;
+    if (windowDays > 0) {
+        int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        windowStart = now - (static_cast<int64_t>(windowDays) * 86400);
+    }
 
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_db) {
@@ -395,9 +398,12 @@ nlohmann::json UsageDatabase::queryBoardStats(const std::string &boardName, int 
         sqlite3_finalize(stmt);
     }
 
-    // 3. Lifetime totals for flash and reboot
+    // 3. Lifetime totals for events
     int lifetimeFlashes = 0;
     int lifetimeReboots = 0;
+    int lifetimePowerCycles = 0;
+    int lifetimeUsbDownloads = 0;
+    int lifetimeBootloaderCatches = 0;
     const char *sqlLifetime =
         "SELECT event_type, COUNT(*) FROM board_events WHERE board_name = ? GROUP BY event_type;";
     if (sqlite3_prepare_v2(_db, sqlLifetime, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -407,6 +413,9 @@ nlohmann::json UsageDatabase::queryBoardStats(const std::string &boardName, int 
             int count = sqlite3_column_int(stmt, 1);
             if (type == "flash") lifetimeFlashes = count;
             else if (type == "reboot") lifetimeReboots = count;
+            else if (type == "power_on" || type == "power_off") lifetimePowerCycles += count;
+            else if (type == "usb_download") lifetimeUsbDownloads += count;
+            else if (type == "bootloader_catch") lifetimeBootloaderCatches += count;
         }
         sqlite3_finalize(stmt);
     }
@@ -429,6 +438,9 @@ nlohmann::json UsageDatabase::queryBoardStats(const std::string &boardName, int 
     nlohmann::json lifetime;
     lifetime["flashes_total"] = lifetimeFlashes;
     lifetime["reboots_total"] = lifetimeReboots;
+    lifetime["power_cycles_total"] = lifetimePowerCycles;
+    lifetime["usb_downloads_total"] = lifetimeUsbDownloads;
+    lifetime["bootloader_catches_total"] = lifetimeBootloaderCatches;
 
     root["summary"] = summary;
     root["lifetime_totals"] = lifetime;
