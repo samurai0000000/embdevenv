@@ -5,6 +5,7 @@
  */
 
 #include "N1655Mcu.hxx"
+#include "UsageDatabase.hxx"
 #include <chrono>
 #include <sstream>
 #include <regex>
@@ -257,31 +258,53 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
 bool N1655Mcu::powerOn()
 {
     std::string resp = sendCommand("pwr on", 3000);
-    return !resp.empty();
+    bool ok = !resp.empty();
+    if (!_targetName.empty()) {
+        UsageDatabase::getInstance().recordEvent(_targetName, "power_on", ok ? "success" : "failed");
+    }
+    return ok;
 }
 
 bool N1655Mcu::powerOff()
 {
     std::string resp = sendCommand("pwr off -y", 3000);
-    return !resp.empty();
+    bool ok = !resp.empty();
+    if (!_targetName.empty()) {
+        UsageDatabase::getInstance().recordEvent(_targetName, "power_off", ok ? "success" : "failed");
+    }
+    return ok;
 }
 
 bool N1655Mcu::reboot()
 {
     std::string resp = sendCommand("reset -y", 3000);
-    return !resp.empty();
+    bool ok = !resp.empty();
+    if (!_targetName.empty()) {
+        UsageDatabase::getInstance().recordEvent(_targetName, "reboot", ok ? "success" : "failed");
+    }
+    return ok;
 }
 
 bool N1655Mcu::resetUsbDownload(bool doubleReset)
 {
     std::string resp = sendCommand("reset -usb -y", 3000);
     if (resp.empty()) {
+        if (!_targetName.empty()) {
+            UsageDatabase::getInstance().recordEvent(_targetName, "usb_download", "failed");
+        }
         return false;
     }
     if (doubleReset) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         resp = sendCommand("reset -usb -y", 3000);
-        return !resp.empty();
+        bool ok = !resp.empty();
+        if (!_targetName.empty()) {
+            UsageDatabase::getInstance().recordEvent(_targetName, "usb_download", ok ? "success" : "failed");
+        }
+        return ok;
+    }
+    if (!_targetName.empty()) {
+        UsageDatabase::getInstance().recordEvent(_targetName, "usb_download", "success");
     }
     return true;
 }
@@ -431,6 +454,10 @@ void N1655Mcu::pollWorker()
                     TelemetrySample sample;
                     if (parseTelemetryBlock(block, sample)) {
                         _telemetryStore->addSample(sample);
+                        if (!_targetName.empty()) {
+                            UsageDatabase::getInstance().recordTelemetrySample(
+                                _targetName, sample.powerOn, sample.temperatureC, sample.fanRpm, sample.voltages);
+                        }
                     }
                 }
             }

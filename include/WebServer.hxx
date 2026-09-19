@@ -11,16 +11,19 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <map>
+#include <mutex>
 
 namespace httplib {
 class Server;
+class Request;
 }
 
 namespace embdevenv {
 
 class WebServer {
 public:
-    WebServer(int port = 3886, const std::string &bindAddress = "0.0.0.0");
+    WebServer(int port = 3886, const std::string &bindAddress = "0.0.0.0", bool endpointsEnabled = false);
     ~WebServer();
 
     bool start();
@@ -29,17 +32,26 @@ public:
 
     int getPort() const;
     const std::string &getBindAddress() const;
+    bool areEndpointsEnabled() const;
+    void setEndpointsEnabled(bool enabled);
 
 private:
     void serverWorker();
     void setupRoutes();
-    std::string getDashboardHtml() const;
+    std::string getDashboardHtml(const std::string &sessionToken = "") const;
+
+    std::string createUiSession();
+    bool isValidUiSession(const httplib::Request &req) const;
 
     int _port;
     std::string _bindAddress;
+    bool _endpointsEnabled;
     std::unique_ptr<httplib::Server> _server;
     std::atomic<bool> _running;
     std::thread _serverThread;
+
+    mutable std::mutex _sessionMutex;
+    std::map<std::string, time_t> _uiSessions;
 };
 
 } // namespace embdevenv

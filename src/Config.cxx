@@ -25,8 +25,15 @@ Config::Config()
 {
     // Default WebConfig
     _webConfig.enabled = true;
+    _webConfig.endpointsEnabled = false;
     _webConfig.port = 3886;
     _webConfig.bindAddress = "0.0.0.0";
+
+    // Default StatsConfig
+    _statsConfig.enabled = true;
+    _statsConfig.dbPath = resolveHomePath("~/.local/share/embdevenv/stats.db");
+    _statsConfig.rollupRetentionDays = 365;
+    _statsConfig.rawEventRetentionDays = 90;
 
     // Default McpConfig
     _mcpConfig.mode = "aimon";
@@ -69,6 +76,16 @@ const std::string &Config::getConfigPath() const
 const WebConfig &Config::getWebConfig() const
 {
     return _webConfig;
+}
+
+const StatsConfig &Config::getStatsConfig() const
+{
+    return _statsConfig;
+}
+
+void Config::setStatsConfig(const StatsConfig &stats)
+{
+    _statsConfig = stats;
 }
 
 const McpConfig &Config::getMcpConfig() const
@@ -135,8 +152,24 @@ bool Config::load(const std::string &customPath)
         try {
             const libconfig::Setting &webSetting = cfg.lookup("web");
             webSetting.lookupValue("enabled", _webConfig.enabled);
+            webSetting.lookupValue("endpoints_enabled", _webConfig.endpointsEnabled);
             webSetting.lookupValue("port", _webConfig.port);
             webSetting.lookupValue("bind_address", _webConfig.bindAddress);
+        } catch (const libconfig::SettingNotFoundException &) {
+        }
+    }
+
+    // Stats section
+    if (cfg.exists("stats")) {
+        try {
+            const libconfig::Setting &statsSetting = cfg.lookup("stats");
+            statsSetting.lookupValue("enabled", _statsConfig.enabled);
+            std::string db;
+            if (statsSetting.lookupValue("db_path", db)) {
+                _statsConfig.dbPath = resolveHomePath(db);
+            }
+            statsSetting.lookupValue("rollup_retention_days", _statsConfig.rollupRetentionDays);
+            statsSetting.lookupValue("raw_event_retention_days", _statsConfig.rawEventRetentionDays);
         } catch (const libconfig::SettingNotFoundException &) {
         }
     }
@@ -273,8 +306,16 @@ bool Config::save()
     // Web section
     libconfig::Setting &web = root.add("web", libconfig::Setting::TypeGroup);
     web.add("enabled", libconfig::Setting::TypeBoolean) = _webConfig.enabled;
+    web.add("endpoints_enabled", libconfig::Setting::TypeBoolean) = _webConfig.endpointsEnabled;
     web.add("port", libconfig::Setting::TypeInt) = _webConfig.port;
     web.add("bind_address", libconfig::Setting::TypeString) = _webConfig.bindAddress;
+
+    // Stats section
+    libconfig::Setting &stats = root.add("stats", libconfig::Setting::TypeGroup);
+    stats.add("enabled", libconfig::Setting::TypeBoolean) = _statsConfig.enabled;
+    stats.add("db_path", libconfig::Setting::TypeString) = _statsConfig.dbPath;
+    stats.add("rollup_retention_days", libconfig::Setting::TypeInt) = _statsConfig.rollupRetentionDays;
+    stats.add("raw_event_retention_days", libconfig::Setting::TypeInt) = _statsConfig.rawEventRetentionDays;
 
     // MCP section
     libconfig::Setting &mcp = root.add("mcp", libconfig::Setting::TypeGroup);

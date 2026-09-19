@@ -11,12 +11,16 @@
 #include <nlohmann/json.hpp>
 #include <cstdio>
 #include <sstream>
+#include <iomanip>
+#include <random>
+#include <ctime>
 
 namespace embdevenv {
 
-WebServer::WebServer(int port, const std::string &bindAddress)
+WebServer::WebServer(int port, const std::string &bindAddress, bool endpointsEnabled)
     : _port(port)
     , _bindAddress(bindAddress)
+    , _endpointsEnabled(endpointsEnabled)
     , _running(false)
 {
 }
@@ -24,6 +28,16 @@ WebServer::WebServer(int port, const std::string &bindAddress)
 WebServer::~WebServer()
 {
     stop();
+}
+
+bool WebServer::areEndpointsEnabled() const
+{
+    return _endpointsEnabled;
+}
+
+void WebServer::setEndpointsEnabled(bool enabled)
+{
+    _endpointsEnabled = enabled;
 }
 
 bool WebServer::start()
@@ -91,15 +105,182 @@ void WebServer::serverWorker()
     _running = false;
 }
 
+std::string WebServer::createUiSession()
+{
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937_64 gen(rd());
+    static thread_local std::uniform_int_distribution<uint64_t> dis;
+
+    uint64_t p1 = dis(gen);
+    uint64_t p2 = dis(gen);
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0') << std::setw(16) << p1 << std::setw(16) << p2;
+    std::string token = oss.str();
+
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    time_t now = time(nullptr);
+    for (auto it = _uiSessions.begin(); it != _uiSessions.end(); ) {
+        if (now - it->second > 86400 * 7) {
+            it = _uiSessions.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    _uiSessions[token] = now;
+    return token;
+}
+
+bool WebServer::isValidUiSession(const httplib::Request &req) const
+{
+    // 1. Block command-line agents and automated scripts
+    if (req.has_header("User-Agent")) {
+        std::string ua = req.get_header_value("User-Agent");
+        for (char &c : ua) c = tolower(c);
+        if (ua.find("curl/") != std::string::npos ||
+            ua.find("python") != std::string::npos ||
+            ua.find("wget/") != std::string::npos ||
+            ua.find("httpie") != std::string::npos ||
+            ua.find("aiohttp") != std::string::npos ||
+            ua.find("go-http-client") != std::string::npos) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    // 2. Extract session token
+    std::string token;
+    if (req.has_header("X-UI-Session")) {
+        token = req.get_header_value("X-UI-Session");
+    } else if (req.has_header("Cookie")) {
+        std::string cookie = req.get_header_value("Cookie");
+        size_t pos = cookie.find("embdevenv_session=");
+        if (pos != std::string::npos) {
+            size_t start = pos + 18;
+            size_t end = cookie.find(';', start);
+            token = (end == std::string::npos) ? cookie.substr(start) : cookie.substr(start, end - start);
+        }
+    }
+
+    if (token.empty()) {
+        return false;
+    }
+
+    // 3. Verify token exists and is fresh
+    std::lock_guard<std::mutex> lock(_sessionMutex);
+    auto it = _uiSessions.find(token);
+    if (it != _uiSessions.end()) {
+        time_t now = time(nullptr);
+        if (now - it->second < 86400 * 7) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static std::string getMcpHintForPath(const std::string &path, const std::string &body)
+{
+    // Extract target name if present: /api/targets/<target>/...
+    std::string target;
+    if (path.rfind("/api/targets/", 0) == 0) {
+        size_t start = 13;
+        size_t end = path.find('/', start);
+        if (end == std::string::npos) {
+            target = path.substr(start);
+        } else {
+            target = path.substr(start, end - start);
+        }
+    }
+
+    if (path == "/api/status") {
+        return "Use official MCP tool 'embdevenv_get_target_status' or 'embdevenv_list_targets'.";
+    }
+    if (path == "/api/targets") {
+        return "Use official MCP tool 'embdevenv_list_targets'.";
+    }
+    if (path == "/api/usb/devices") {
+        return "Use official MCP tool 'embdevenv_usb_list_devices'.";
+    }
+    if (path.find("/mcu/power") != std::string::npos) {
+        if (!body.empty()) {
+            try {
+                auto j = nlohmann::json::parse(body);
+                std::string action = j.value("action", "");
+                if (action == "on") {
+                    return "Use official MCP tool 'embdevenv_mcu_power_on' with argument {\"target\": \"" + target + "\"}.";
+                } else if (action == "off") {
+                    return "Use official MCP tool 'embdevenv_mcu_power_off' with argument {\"target\": \"" + target + "\"}.";
+                } else if (action == "reboot") {
+                    return "Use official MCP tool 'embdevenv_mcu_reboot' with argument {\"target\": \"" + target + "\"}.";
+                }
+            } catch (...) {}
+        }
+        return "Use official MCP tool 'embdevenv_mcu_power_on', 'embdevenv_mcu_power_off', or 'embdevenv_mcu_reboot' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/mcu/command") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_mcu_send_command' with argument {\"target\": \"" + target + "\", \"command\": \"<command>\"}.";
+    }
+    if (path.find("/mcu/telemetry/history") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_mcu_get_telemetry_history' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/mcu/telemetry") != std::string::npos || path.find("/mcu") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_mcu_get_telemetry', 'embdevenv_mcu_get_voltages', 'embdevenv_mcu_get_temperature', or 'embdevenv_mcu_get_fan_speed' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/console/write") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_console_write' or 'embdevenv_console_expect' with argument {\"target\": \"" + target + "\", \"command\": \"<command>\"}.";
+    }
+    if (path.find("/console/clear") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_console_clear' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/console") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_console_read', 'embdevenv_console_expect', or 'embdevenv_console_catch_bootloader' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/flash/status") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_flash_get_status' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/flash") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_flash_target' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (path.find("/stats") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_get_board_stats' with argument {\"target\": \"" + target + "\"}.";
+    }
+    if (!target.empty()) {
+        return "Use official MCP tool 'embdevenv_get_target_status' with argument {\"target\": \"" + target + "\"}.";
+    }
+    return "Use official MCP tools ('embdevenv_*' via aimon gateway or standalone server). Direct REST API access is disabled.";
+}
+
 void WebServer::setupRoutes()
 {
     if (_server == nullptr) {
         return;
     }
 
+    // Gate REST API endpoints if disabled by configuration, unless request is from an authenticated Web UI session
+    if (!_endpointsEnabled) {
+        _server->set_pre_routing_handler([this](const httplib::Request &req, httplib::Response &res) {
+            if (req.path == "/api" || req.path.rfind("/api/", 0) == 0) {
+                if (!isValidUiSession(req)) {
+                    res.status = 403;
+                    std::string mcpHint = getMcpHintForPath(req.path, req.body);
+                    nlohmann::json err = {
+                        {"error", "Direct REST API access is disabled. Use official MCP tools instead."},
+                        {"hint", mcpHint}
+                    };
+                    res.set_content(err.dump(2), "application/json");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+    }
+
     // Root dashboard
     _server->Get("/", [this](const httplib::Request &, httplib::Response &res) {
-        res.set_content(getDashboardHtml(), "text/html");
+        std::string token = createUiSession();
+        res.set_header("Set-Cookie", "embdevenv_session=" + token + "; Path=/; SameSite=Strict");
+        res.set_content(getDashboardHtml(token), "text/html");
     });
 
     // Overall status
@@ -477,9 +658,9 @@ void WebServer::setupRoutes()
     });
 }
 
-std::string WebServer::getDashboardHtml() const
+std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
 {
-    return R"rawhtml(<!DOCTYPE html>
+    std::string html = R"rawhtml(<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -488,6 +669,28 @@ std::string WebServer::getDashboardHtml() const
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script>
+        window.__UI_SESSION_TOKEN__ = ")rawhtml";
+    html += sessionToken;
+    html += R"rawhtml(";
+        (function() {
+            const originalFetch = window.fetch;
+            window.fetch = function(url, options) {
+                options = options || {};
+                options.headers = options.headers || {};
+                if (window.__UI_SESSION_TOKEN__) {
+                    if (options.headers instanceof Headers) {
+                        options.headers.set('X-UI-Session', window.__UI_SESSION_TOKEN__);
+                    } else if (Array.isArray(options.headers)) {
+                        options.headers.push(['X-UI-Session', window.__UI_SESSION_TOKEN__]);
+                    } else {
+                        options.headers['X-UI-Session'] = window.__UI_SESSION_TOKEN__;
+                    }
+                }
+                return originalFetch(url, options);
+            };
+        })();
+    </script>
     <style>
         :root {
             --bg-base: #0a0f1d;
@@ -621,9 +824,14 @@ std::string WebServer::getDashboardHtml() const
         }
         .dashboard-grid {
             display: grid;
-            grid-template-columns: 320px 1fr;
+            grid-template-columns: 360px 1fr;
             gap: 1rem;
             align-items: start;
+        }
+        @media (max-width: 900px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
         }
         .console-card {
             background: var(--bg-card);
@@ -793,23 +1001,37 @@ std::string WebServer::getDashboardHtml() const
         .voltages-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 0.3rem;
-            max-height: 180px;
-            overflow-y: auto;
-            padding-right: 0.25rem;
+            gap: 0.25rem;
+            max-height: none;
+            overflow: visible;
         }
         .voltage-item {
             background: #0d1424;
             border: 1px solid var(--border);
-            padding: 0.25rem 0.4rem;
+            padding: 0.25rem 0.35rem;
             border-radius: 4px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            font-size: 0.75rem;
+            font-size: 0.72rem;
+            overflow: hidden;
+            box-sizing: border-box;
         }
-        .voltage-name { color: var(--text-muted); font-size: 0.7rem; }
-        .voltage-num { font-family: monospace; font-weight: 600; color: #38bdf8; }
+        .voltage-name {
+            color: var(--text-muted);
+            font-size: 0.65rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 56px;
+        }
+        .voltage-num {
+            font-family: monospace;
+            font-weight: 600;
+            color: #38bdf8;
+            font-size: 0.72rem;
+            white-space: nowrap;
+        }
         .cmd-input {
             background: var(--bg-term);
             border: 1px solid var(--border);
@@ -1020,13 +1242,18 @@ std::string WebServer::getDashboardHtml() const
     </header>
 
     <main>
+        <div id="endpointsDisabledBanner" style="display:none; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.3); border-radius:8px; padding:0.6rem 1rem; margin-bottom:1rem; align-items:center; gap:0.6rem; font-size:0.85rem; color:#fbbf24;">
+            <span style="font-size:1.1rem;">&#x26A0;</span>
+            <span>REST API endpoints are disabled by default (<code>web.endpoints_enabled = false</code>). Web dashboard controls and polling are restricted. Official MCP tools remain active.</span>
+        </div>
+
         <div id="targetTabs" class="tabs-container">
             <!-- Dynamically populated target tabs -->
         </div>
 
         <div class="dashboard-grid">
             <!-- Left Column: Controls & Telemetry -->
-            <div style="display:flex; flex-direction:column; gap:0.75rem; height:495px; box-sizing:border-box;">
+            <div style="display:flex; flex-direction:column; gap:0.75rem; box-sizing:border-box;">
                 <div class="card">
                     <div class="card-header">
                         <span class="card-title">&#x26A1; Power & Target State</span>
@@ -1055,7 +1282,7 @@ std::string WebServer::getDashboardHtml() const
                     </div>
                 </div>
 
-                <div class="card" style="flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+                <div class="card" style="display:flex; flex-direction:column; gap:0.6rem;">
                     <div class="card-header">
                         <span class="card-title">&#x1F4CA; Live Telemetry</span>
                         <span id="telemetryTime" style="font-size:0.75rem; color:var(--text-muted)">-</span>
@@ -1920,7 +2147,13 @@ std::string WebServer::getDashboardHtml() const
         async function fetchTargets() {
             try {
                 const res = await fetch('/api/targets');
-                if (!res.ok) return;
+                if (!res.ok) {
+                    if (res.status === 403) {
+                        const banner = document.getElementById('endpointsDisabledBanner');
+                        if (banner) banner.style.display = 'flex';
+                    }
+                    return;
+                }
                 const data = await res.json();
                 targets = data.targets || [];
                 renderTabs();
@@ -2120,6 +2353,7 @@ std::string WebServer::getDashboardHtml() const
 </body>
 </html>
 )rawhtml";
+    return html;
 }
 
 } // namespace embdevenv

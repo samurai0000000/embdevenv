@@ -52,6 +52,7 @@ N1655Target::N1655Target(const TargetConfig &config)
     if (!config.mcu.port.empty() || !config.usbPath.empty()) {
         auto mcu = std::make_shared<N1655Mcu>(
             config.mcu.port, config.mcu.baudRate, config.mcu.pollIntervalMs, config.mcu.telnetPort);
+        mcu->setTargetName(config.name);
         if (!config.usbPath.empty()) {
             int pIdx = (config.mcu.portIndex >= 0) ? config.mcu.portIndex : 3;
             mcu->setUsbBinding(config.usbPath, pIdx);

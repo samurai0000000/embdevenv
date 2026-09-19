@@ -12,8 +12,10 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <fstream>
 #include "SerialPort.hxx"
 #include "RingBuffer.hxx"
 #include "TelnetBackend.hxx"
@@ -34,6 +36,36 @@ public:
 
     ssize_t write(const char *data, size_t len) override;
     ssize_t write(const std::string &data) override;
+    ssize_t writePaced(const std::string &data, int charDelayMs = 0);
+
+    struct CatchBootloaderResult {
+        bool success = false;
+        std::string matchedPrompt;
+        double elapsedSec = 0.0;
+        std::string capturedOutput;
+    };
+
+    struct ExpectResult {
+        bool success = false;
+        std::string matchedPattern;
+        double elapsedSec = 0.0;
+        std::string capturedOutput;
+    };
+
+    CatchBootloaderResult catchBootloader(const std::string &prompt = "=>",
+                                         const std::string &interruptKey = " ",
+                                         int timeoutSec = 30,
+                                         int pollIntervalMs = 50);
+
+    ExpectResult expect(const std::string &command,
+                        const std::vector<std::string> &patterns,
+                        int timeoutSec = 60,
+                        int charDelayMs = 0,
+                        const std::string &logFilePath = "");
+
+    bool startLogFile(const std::string &path);
+    void stopLogFile();
+    bool isLoggingToFile() const;
 
     std::vector<std::string> getRecentLines(size_t count = 100) const;
     void clearBuffer();
@@ -50,6 +82,11 @@ public:
 
 private:
     void readWorker();
+
+    std::mutex _fileLogMutex;
+    int _fileLogListenerId = 0;
+    std::string _fileLogPath;
+    std::unique_ptr<std::ofstream> _fileLogStream;
 
     std::string _name;
     std::string _port;

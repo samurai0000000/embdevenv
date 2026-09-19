@@ -34,6 +34,12 @@ public:
 
     virtual const std::string &getPort() const = 0;
     virtual int getBaudRate() const = 0;
+
+    const std::string &getTargetName() const { return _targetName; }
+    void setTargetName(const std::string &name) { _targetName = name; }
+
+protected:
+    std::string _targetName;
 };
 
 } // namespace embdevenv

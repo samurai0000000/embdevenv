@@ -50,12 +50,14 @@ configure_file(
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(CONFIGPP REQUIRED libconfig++)
+pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
 # Source files
 set(SOURCES
     src/Main.cxx
     src/SerialPort.cxx
     src/TelemetryStore.cxx
+    src/UsageDatabase.cxx
     src/N1655Mcu.cxx
     src/Console.cxx
     src/TelnetServer.cxx
@@ -81,13 +83,18 @@ target_include_directories(embdevenv PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib
     ${CONFIGPP_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
 )
 
 target_link_libraries(embdevenv PRIVATE
     Threads::Threads
     ${CONFIGPP_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
 )
 
 if(CONFIGPP_LIBRARY_DIRS)
     target_link_directories(embdevenv PRIVATE ${CONFIGPP_LIBRARY_DIRS})
+endif()
+if(SQLITE3_LIBRARY_DIRS)
+    target_link_directories(embdevenv PRIVATE ${SQLITE3_LIBRARY_DIRS})
 endif()

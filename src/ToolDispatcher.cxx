@@ -8,9 +8,22 @@
 #include "TargetManager.hxx"
 #include "Config.hxx"
 #include "FlashManager.hxx"
+#include "UsageDatabase.hxx"
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 namespace embdevenv {
+
+static std::shared_ptr<Console> resolveTargetConsole(std::shared_ptr<Target> target, const std::string &consoleName)
+{
+    if (!target) return nullptr;
+    if (!consoleName.empty()) {
+        auto c = target->getConsoleByName(consoleName);
+        if (c) return c;
+    }
+    return target->getConsole(0);
+}
 
 using json = nlohmann::json;
 
@@ -168,7 +181,8 @@ json ToolDispatcher::getToolDefinitions()
                 {"type", "object"},
                 {"properties", {
                     {"target", {{"type", "string"}, {"description", "Target name"}}},
-                    {"lines", {{"type", "integer"}, {"description", "Maximum lines to read (default: 50)"}}}
+                    {"lines", {{"type", "integer"}, {"description", "Maximum lines to read (default: 50)"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
                 }},
                 {"required", json::array({"target"})}
             }}
@@ -180,7 +194,9 @@ json ToolDispatcher::getToolDefinitions()
                 {"type", "object"},
                 {"properties", {
                     {"target", {{"type", "string"}, {"description", "Target name"}}},
-                    {"data", {{"type", "string"}, {"description", "Data or command to write"}}}
+                    {"data", {{"type", "string"}, {"description", "Data or command to write"}}},
+                    {"char_delay_ms", {{"type", "integer"}, {"description", "Inter-character pacing delay in ms to avoid UART buffer overflow (default: 0)"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
                 }},
                 {"required", json::array({"target", "data"})}
             }}
@@ -191,7 +207,82 @@ json ToolDispatcher::getToolDefinitions()
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
-                    {"target", {{"type", "string"}, {"description", "Target name"}}}
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_console_catch_bootloader"},
+            {"description", "Interrupt target bootloader autoboot sequence within milliseconds and stop at boot prompt (e.g. =>). Native C++ replacement for catch_uboot socket scripts."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"prompt", {{"type", "string"}, {"description", "Bootloader prompt to match (default: '=>')"}}},
+                    {"interrupt_key", {{"type", "string"}, {"description", "Character to send repeatedly (default: ' ')"}}},
+                    {"timeout_sec", {{"type", "integer"}, {"description", "Maximum seconds to wait (default: 30)"}}},
+                    {"reboot_first", {{"type", "boolean"}, {"description", "Reboot target via MCU before starting catch loop (default: false)"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_console_expect"},
+            {"description", "Send command with optional character pacing and wait for one or more sentinel string patterns or timeout. Returns matched pattern and captured output. Native C++ replacement for pexpect / socket capture scripts."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"wait_for", {
+                        {"type", "array"},
+                        {"items", {{"type", "string"}}},
+                        {"description", "Array of string patterns to wait for (e.g. ['=>', 'Kernel panic', 'login:'])"}
+                    }},
+                    {"command", {{"type", "string"}, {"description", "Optional command line to send before waiting"}}},
+                    {"timeout_sec", {{"type", "integer"}, {"description", "Maximum seconds to wait (default: 60)"}}},
+                    {"char_delay_ms", {{"type", "integer"}, {"description", "Pacing delay between characters in ms (default: 10)"}}},
+                    {"log_file", {{"type", "string"}, {"description", "Optional host file path to record streaming console output"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target", "wait_for"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_console_start_log"},
+            {"description", "Start continuous streaming capture of target serial console output to a file on host disk."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"file_path", {{"type", "string"}, {"description", "Host file path to write log into"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target", "file_path"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_console_stop_log"},
+            {"description", "Stop active serial console file logging for a target."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target"})}
+            }}
+        },
+        {
+            {"name", "embdevenv_get_board_stats"},
+            {"description", "Retrieve persistent board usage statistics, wear metrics, flasher history, reboot counts, and 1-year rolling averages from SQLite database."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target name"}}},
+                    {"window_days", {{"type", "integer"}, {"description", "Rolling window in days (default: 30, e.g. 1, 7, 30, 365)"}}}
                 }},
                 {"required", json::array({"target"})}
             }}
@@ -303,12 +394,48 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return toolMcuSendCommand(target, cmd, timeoutMs);
     } else if (name == "embdevenv_console_read") {
         size_t lines = args.value("lines", 50);
-        return toolConsoleRead(target, lines);
+        std::string console = args.value("console", "");
+        return toolConsoleRead(target, lines, console);
     } else if (name == "embdevenv_console_write") {
         std::string data = args.value("data", "");
-        return toolConsoleWrite(target, data);
+        int charDelayMs = args.value("char_delay_ms", 0);
+        std::string console = args.value("console", "");
+        return toolConsoleWrite(target, data, charDelayMs, console);
     } else if (name == "embdevenv_console_clear") {
-        return toolConsoleClear(target);
+        std::string console = args.value("console", "");
+        return toolConsoleClear(target, console);
+    } else if (name == "embdevenv_console_catch_bootloader") {
+        std::string prompt = args.value("prompt", "=>");
+        std::string interruptKey = args.value("interrupt_key", " ");
+        int timeoutSec = args.value("timeout_sec", 30);
+        bool rebootFirst = args.value("reboot_first", false);
+        std::string console = args.value("console", "");
+        return toolConsoleCatchBootloader(target, prompt, interruptKey, timeoutSec, rebootFirst, console);
+    } else if (name == "embdevenv_console_expect") {
+        std::string command = args.value("command", "");
+        std::vector<std::string> patterns;
+        if (args.contains("wait_for") && args["wait_for"].is_array()) {
+            for (const auto &p : args["wait_for"]) {
+                if (p.is_string()) {
+                    patterns.push_back(p.get<std::string>());
+                }
+            }
+        }
+        int timeoutSec = args.value("timeout_sec", 60);
+        int charDelayMs = args.value("char_delay_ms", 10);
+        std::string logFile = args.value("log_file", "");
+        std::string console = args.value("console", "");
+        return toolConsoleExpect(target, command, patterns, timeoutSec, charDelayMs, logFile, console);
+    } else if (name == "embdevenv_console_start_log") {
+        std::string filePath = args.value("file_path", "");
+        std::string console = args.value("console", "");
+        return toolConsoleStartLog(target, filePath, console);
+    } else if (name == "embdevenv_console_stop_log") {
+        std::string console = args.value("console", "");
+        return toolConsoleStopLog(target, console);
+    } else if (name == "embdevenv_get_board_stats") {
+        int windowDays = args.value("window_days", 30);
+        return toolGetBoardStats(target, windowDays);
     } else if (name == "embdevenv_telnet_get_status") {
         return toolTelnetGetStatus(target);
     } else if (name == "embdevenv_flash_target") {
@@ -487,24 +614,27 @@ std::string ToolDispatcher::toolMcuSendCommand(const std::string &targetName, co
     return j.dump(2);
 }
 
-std::string ToolDispatcher::toolConsoleRead(const std::string &targetName, size_t lines)
+std::string ToolDispatcher::toolConsoleRead(const std::string &targetName, size_t lines, const std::string &consoleName)
 {
     auto target = TargetManager::getInstance().getTarget(targetName);
-    if (!target || !target->getConsole()) {
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
         return "Error: Console not available for '" + targetName + "'";
     }
-    std::vector<std::string> logLines = target->getConsole()->getRecentLines(lines);
+    std::vector<std::string> logLines = console->getRecentLines(lines);
     json j;
     j["target"] = targetName;
+    j["console"] = console->getName();
     j["lineCount"] = logLines.size();
     j["lines"] = logLines;
     return j.dump(2);
 }
 
-std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, const std::string &data)
+std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, const std::string &data, int charDelayMs, const std::string &consoleName)
 {
     auto target = TargetManager::getInstance().getTarget(targetName);
-    if (!target || !target->getConsole()) {
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
         return "Error: Console not available for '" + targetName + "'";
     }
 
@@ -529,24 +659,147 @@ std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, cons
         pos += 1;
     }
 
-    ssize_t written = target->getConsole()->write(processed);
+    ssize_t written = console->writePaced(processed, charDelayMs);
     json j = {
         {"target", targetName},
+        {"console", console->getName()},
         {"success", written >= 0},
-        {"bytesWritten", written}
+        {"bytesWritten", written},
+        {"charDelayMs", charDelayMs}
     };
     return j.dump(2);
 }
 
-std::string ToolDispatcher::toolConsoleClear(const std::string &targetName)
+std::string ToolDispatcher::toolConsoleClear(const std::string &targetName, const std::string &consoleName)
 {
     auto target = TargetManager::getInstance().getTarget(targetName);
-    if (!target || !target->getConsole()) {
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
         return "Error: Console not available for '" + targetName + "'";
     }
-    target->getConsole()->clearBuffer();
-    json j = {{"target", targetName}, {"success", true}, {"cleared", true}};
+    console->clearBuffer();
+    json j = {{"target", targetName}, {"console", console->getName()}, {"success", true}, {"cleared", true}};
     return j.dump(2);
+}
+
+std::string ToolDispatcher::toolConsoleCatchBootloader(const std::string &targetName,
+                                                      const std::string &prompt,
+                                                      const std::string &interruptKey,
+                                                      int timeoutSec,
+                                                      bool rebootFirst,
+                                                      const std::string &consoleName)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
+        return "Error: Target or console not available for '" + targetName + "'";
+    }
+
+    if (rebootFirst && target->getMcu()) {
+        target->getMcu()->reboot();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    auto res = console->catchBootloader(prompt, interruptKey, timeoutSec);
+    UsageDatabase::getInstance().recordEvent(
+        targetName,
+        "bootloader_catch",
+        res.success ? "success" : "timeout",
+        static_cast<int64_t>(res.elapsedSec * 1000.0),
+        res.matchedPrompt
+    );
+
+    json j = {
+        {"target", targetName},
+        {"console", console->getName()},
+        {"success", res.success},
+        {"matchedPrompt", res.matchedPrompt},
+        {"elapsedSec", res.elapsedSec},
+        {"capturedOutput", res.capturedOutput}
+    };
+    return j.dump(2);
+}
+
+std::string ToolDispatcher::toolConsoleExpect(const std::string &targetName,
+                                             const std::string &command,
+                                             const std::vector<std::string> &patterns,
+                                             int timeoutSec,
+                                             int charDelayMs,
+                                             const std::string &logFilePath,
+                                             const std::string &consoleName)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
+        return "Error: Target or console not available for '" + targetName + "'";
+    }
+
+    std::string resolvedLog = !logFilePath.empty() ? Config::resolveHomePath(logFilePath) : "";
+    auto res = console->expect(command, patterns, timeoutSec, charDelayMs, resolvedLog);
+
+    json j = {
+        {"target", targetName},
+        {"console", console->getName()},
+        {"success", res.success},
+        {"matchedPattern", res.matchedPattern},
+        {"elapsedSec", res.elapsedSec},
+        {"capturedOutput", res.capturedOutput}
+    };
+    if (!resolvedLog.empty()) {
+        j["logFile"] = resolvedLog;
+    }
+    return j.dump(2);
+}
+
+std::string ToolDispatcher::toolConsoleStartLog(const std::string &targetName,
+                                               const std::string &filePath,
+                                               const std::string &consoleName)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
+        return "Error: Target or console not available for '" + targetName + "'";
+    }
+
+    std::string resolved = Config::resolveHomePath(filePath);
+    bool ok = console->startLogFile(resolved);
+    json j = {
+        {"target", targetName},
+        {"console", console->getName()},
+        {"success", ok},
+        {"filePath", resolved}
+    };
+    return j.dump(2);
+}
+
+std::string ToolDispatcher::toolConsoleStopLog(const std::string &targetName,
+                                              const std::string &consoleName)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
+        return "Error: Target or console not available for '" + targetName + "'";
+    }
+
+    console->stopLogFile();
+    json j = {
+        {"target", targetName},
+        {"console", console->getName()},
+        {"success", true},
+        {"stopped", true}
+    };
+    return j.dump(2);
+}
+
+std::string ToolDispatcher::toolGetBoardStats(const std::string &targetName, int windowDays)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    if (!target) {
+        return "Error: Target '" + targetName + "' not found";
+    }
+
+    json stats = UsageDatabase::getInstance().queryBoardStats(targetName, windowDays);
+    return stats.dump(2);
 }
 
 std::string ToolDispatcher::toolTelnetGetStatus(const std::string &targetName)

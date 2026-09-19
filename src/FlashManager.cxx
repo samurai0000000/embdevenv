@@ -8,6 +8,7 @@
 #include "UsbMatrixEmbedded.hxx"
 #include "Config.hxx"
 #include "TargetManager.hxx"
+#include "UsageDatabase.hxx"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -427,6 +428,13 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     } else {
         updateState("failed", false, "usb-matrix failed with exit code " + std::to_string(exitCode));
     }
+
+    UsageDatabase::getInstance().recordEvent(
+        params.target,
+        "flash",
+        result.success ? "success" : "failed",
+        result.durationMs,
+        result.error.empty() ? result.stage : result.error);
 
     _isFlashing = false;
     return result;

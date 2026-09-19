@@ -12,6 +12,7 @@
 #include "WebServer.hxx"
 #include "AimonGatewayClient.hxx"
 #include "StandaloneMcpServer.hxx"
+#include "UsageDatabase.hxx"
 #include <iostream>
 #include <memory>
 #include <atomic>
@@ -113,11 +114,18 @@ int main(int argc, char **argv)
         fprintf(stderr, "[embdevenv] Configured target '%s' (%s)\n", tc.name.c_str(), tc.model.c_str());
     }
 
+    // Initialize Board Usage Statistics Database
+    const auto &statsCfg = config.getStatsConfig();
+    if (statsCfg.enabled) {
+        embdevenv::UsageDatabase::getInstance().open(statsCfg.dbPath);
+    }
+
     // Start Web Server FIRST so monitoring interface is immediately accessible
     std::unique_ptr<embdevenv::WebServer> webServer;
     const auto &webCfg = config.getWebConfig();
     if (webCfg.enabled) {
-        webServer = std::make_unique<embdevenv::WebServer>(webCfg.port, webCfg.bindAddress);
+        webServer = std::make_unique<embdevenv::WebServer>(
+            webCfg.port, webCfg.bindAddress, webCfg.endpointsEnabled);
         if (!webServer->start()) {
             fprintf(stderr, "[embdevenv] Warning: failed to start web server on port %d\n", webCfg.port);
         }
@@ -168,6 +176,11 @@ int main(int argc, char **argv)
 
     // Stop Targets
     targetMgr.stopAll();
+
+    // Close Board Usage Statistics Database
+    if (statsCfg.enabled) {
+        embdevenv::UsageDatabase::getInstance().close();
+    }
 
     instanceLock.release();
     fprintf(stderr, "[embdevenv] Clean shutdown complete.\n");

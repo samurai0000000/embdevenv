@@ -17,8 +17,16 @@ namespace embdevenv {
 
 struct WebConfig {
     bool enabled = true;
+    bool endpointsEnabled = false; // Closed by default
     int port = 3886;
     std::string bindAddress = "0.0.0.0";
+};
+
+struct StatsConfig {
+    bool enabled = true;
+    std::string dbPath = "~/.local/share/embdevenv/stats.db";
+    int rollupRetentionDays = 365;
+    int rawEventRetentionDays = 90;
 };
 
 struct McpConfig {
@@ -42,11 +50,13 @@ public:
 
     const std::string &getConfigPath() const;
     const WebConfig &getWebConfig() const;
+    const StatsConfig &getStatsConfig() const;
     const McpConfig &getMcpConfig() const;
     const FlashingGlobalConfig &getFlashingGlobalConfig() const;
     const std::vector<TargetConfig> &getTargets() const;
 
     void setWebConfig(const WebConfig &web);
+    void setStatsConfig(const StatsConfig &stats);
     void setMcpConfig(const McpConfig &mcp);
     void setTargets(const std::vector<TargetConfig> &targets);
     void addTarget(const TargetConfig &target);
@@ -61,6 +71,7 @@ private:
 
     std::string _configPath;
     WebConfig _webConfig;
+    StatsConfig _statsConfig;
     McpConfig _mcpConfig;
     FlashingGlobalConfig _flashingConfig;
     std::vector<TargetConfig> _targets;
