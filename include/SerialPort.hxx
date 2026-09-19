@@ -8,6 +8,7 @@
 #define EMBDEVENV_SERIAL_PORT_HXX
 
 #include <string>
+#include <vector>
 #include <mutex>
 #include <cstddef>
 #include <termios.h>
@@ -41,11 +42,19 @@ public:
     // Reconnection helper
     bool reconnect();
 
+    // USB topology binding
+    static std::vector<std::string> resolveUsbTtyNodes(const std::string &usbPath);
+    void setUsbBinding(const std::string &usbPath, int portIndex);
+    const std::string &getUsbPath() const;
+    int getPortIndex() const;
+
 private:
     speed_t baudRateToSpeed(int baudRate) const;
     bool configureTermios();
 
     std::string _device;
+    std::string _usbPath;
+    int _portIndex;
     int _baudRate;
     int _fd;
     mutable std::mutex _lifecycleMutex;

@@ -20,6 +20,7 @@ struct ConsoleConfig {
     int baudRate = 115200;
     int telnetPort = 0;
     size_t lineBufferCapacity = 10000;
+    int portIndex = -1;
 };
 
 struct McuConfig {
@@ -28,6 +29,7 @@ struct McuConfig {
     std::string prompt = "#";
     int telnetPort = 0;
     int pollIntervalMs = 2000;
+    int portIndex = -1;
 };
 
 struct TargetFlashConfig {
@@ -43,6 +45,7 @@ struct TargetConfig {
     std::string model;
     std::string description;
     bool enabled = true;
+    std::string usbPath;
 
     // Multi-console & MCU configuration
     std::vector<ConsoleConfig> consoles;

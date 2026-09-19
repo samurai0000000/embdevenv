@@ -31,6 +31,7 @@ struct FlashResult {
     bool success = false;
     std::string target;
     std::string stage;
+    std::string mode = "emmc_flash"; // "emmc_flash" or "ram_boot"
     int durationMs = 0;
     std::string usbMatrixLog;
     std::string error;
@@ -62,6 +63,7 @@ private:
 
     mutable std::mutex _mutex;
     std::atomic<bool> _isFlashing;
+    std::chrono::steady_clock::time_point _flashStartTime;
     FlashResult _lastResult;
     std::string _cachedBinaryPath;
 };

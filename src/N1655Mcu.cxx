@@ -76,6 +76,9 @@ bool N1655Mcu::isConnected() const
 
 const std::string &N1655Mcu::getPort() const
 {
+    if (!_serial.getDevice().empty()) {
+        return _serial.getDevice();
+    }
     return _port;
 }
 
@@ -207,6 +210,7 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
             return "";
         }
         _connected = true;
+        _port = _serial.getDevice();
     }
 
     _serial.flush();
@@ -353,6 +357,7 @@ void N1655Mcu::pollWorker()
             if (!_serial.isOpen()) {
                 if (_serial.open(_port, _baudRate)) {
                     _connected = true;
+                    _port = _serial.getDevice();
                     recoverPrompt(500);
                 } else {
                     _connected = false;
@@ -438,10 +443,15 @@ void N1655Mcu::pollWorker()
     }
 }
 
+void N1655Mcu::setUsbBinding(const std::string &usbPath, int portIndex)
+{
+    _serial.setUsbBinding(usbPath, portIndex);
+}
+
 nlohmann::json N1655Mcu::getStatusJson() const
 {
     nlohmann::json j;
-    j["port"] = _port;
+    j["port"] = getPort();
     j["baudRate"] = _baudRate;
     j["running"] = _running.load();
     j["connected"] = _connected.load();

@@ -16,10 +16,15 @@ N1655Target::N1655Target(const TargetConfig &config)
 {
     // Configure consoles
     if (!config.consoles.empty()) {
+        int defaultIdx = 0;
         for (const auto &cc : config.consoles) {
-            if (!cc.port.empty()) {
+            if (!cc.port.empty() || !config.usbPath.empty()) {
                 auto console = std::make_shared<Console>(
                     cc.name, cc.port, cc.baudRate, cc.lineBufferCapacity, cc.telnetPort);
+                if (!config.usbPath.empty()) {
+                    int pIdx = (cc.portIndex >= 0) ? cc.portIndex : defaultIdx;
+                    console->setUsbBinding(config.usbPath, pIdx);
+                }
                 addConsole(console);
 
                 if (cc.telnetPort > 0) {
@@ -27,10 +32,14 @@ N1655Target::N1655Target(const TargetConfig &config)
                     addTelnetServer(telnetServer);
                 }
             }
+            defaultIdx++;
         }
-    } else if (!config.consolePort.empty()) {
+    } else if (!config.consolePort.empty() || !config.usbPath.empty()) {
         auto console = std::make_shared<Console>(
             "console0", config.consolePort, config.consoleBaudRate, 10000, config.telnetPort);
+        if (!config.usbPath.empty()) {
+            console->setUsbBinding(config.usbPath, 0);
+        }
         addConsole(console);
 
         if (config.telnetPort > 0) {
@@ -40,9 +49,13 @@ N1655Target::N1655Target(const TargetConfig &config)
     }
 
     // Configure MCU
-    if (!config.mcu.port.empty()) {
+    if (!config.mcu.port.empty() || !config.usbPath.empty()) {
         auto mcu = std::make_shared<N1655Mcu>(
             config.mcu.port, config.mcu.baudRate, config.mcu.pollIntervalMs, config.mcu.telnetPort);
+        if (!config.usbPath.empty()) {
+            int pIdx = (config.mcu.portIndex >= 0) ? config.mcu.portIndex : 3;
+            mcu->setUsbBinding(config.usbPath, pIdx);
+        }
         setMcu(mcu);
 
         if (config.mcu.telnetPort > 0) {

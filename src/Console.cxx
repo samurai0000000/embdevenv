@@ -138,6 +138,9 @@ const std::string &Console::getName() const
 
 const std::string &Console::getPort() const
 {
+    if (!_serial.getDevice().empty()) {
+        return _serial.getDevice();
+    }
     return _port;
 }
 
@@ -151,6 +154,11 @@ int Console::getTelnetPort() const
     return _telnetPort;
 }
 
+void Console::setUsbBinding(const std::string &usbPath, int portIndex)
+{
+    _serial.setUsbBinding(usbPath, portIndex);
+}
+
 void Console::readWorker()
 {
     char buf[512];
@@ -159,6 +167,7 @@ void Console::readWorker()
         if (!_serial.isOpen()) {
             if (_serial.open(_port, _baudRate)) {
                 _connected = true;
+                _port = _serial.getDevice();
             } else {
                 _connected = false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));

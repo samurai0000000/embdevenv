@@ -8,15 +8,21 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <poll.h>
+#include <dirent.h>
+#include <limits.h>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
 #include <chrono>
+#include <vector>
+#include <algorithm>
 
 namespace embdevenv {
 
 SerialPort::SerialPort()
     : _device("")
+    , _usbPath("")
+    , _portIndex(-1)
     , _baudRate(115200)
     , _fd(-1)
     , _lastOpenError(0)
@@ -26,6 +32,8 @@ SerialPort::SerialPort()
 
 SerialPort::SerialPort(const std::string &device, int baudRate)
     : _device(device)
+    , _usbPath("")
+    , _portIndex(-1)
     , _baudRate(baudRate)
     , _fd(-1)
     , _lastOpenError(0)
@@ -36,6 +44,93 @@ SerialPort::SerialPort(const std::string &device, int baudRate)
 SerialPort::~SerialPort()
 {
     close();
+}
+
+std::vector<std::string> SerialPort::resolveUsbTtyNodes(const std::string &usbPath)
+{
+    std::vector<std::string> results;
+    if (usbPath.empty()) {
+        return results;
+    }
+
+    DIR *dir = opendir("/sys/class/tty");
+    if (!dir) {
+        return results;
+    }
+
+    struct NodeInfo {
+        std::string devPath;
+        int minor;
+    };
+    std::vector<NodeInfo> matchedNodes;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') {
+            continue;
+        }
+
+        std::string name = entry->d_name;
+        // Only inspect USB serial tty class devices
+        if (name.rfind("ttyCH9344USB", 0) != 0 &&
+            name.rfind("ttyUSB", 0) != 0 &&
+            name.rfind("ttyACM", 0) != 0) {
+            continue;
+        }
+
+        std::string devLink = "/sys/class/tty/" + name + "/device";
+        char resolved[PATH_MAX];
+        char *rp = realpath(devLink.c_str(), resolved);
+        if (!rp) {
+            continue;
+        }
+
+        std::string resolvedPath(rp);
+        // Check if resolved sysfs path contains usbPath (e.g. "4-10.3.2")
+        if (resolvedPath.find(usbPath) == std::string::npos) {
+            continue;
+        }
+
+        // Read minor number from /sys/class/tty/<name>/dev
+        int major = 0, minor = 0;
+        std::string devFile = "/sys/class/tty/" + name + "/dev";
+        FILE *df = fopen(devFile.c_str(), "r");
+        if (df) {
+            if (fscanf(df, "%d:%d", &major, &minor) == 2) {
+                matchedNodes.push_back({"/dev/" + name, minor});
+            }
+            fclose(df);
+        }
+    }
+    closedir(dir);
+
+    // Sort by minor number in ascending order
+    std::sort(matchedNodes.begin(), matchedNodes.end(), [](const NodeInfo &a, const NodeInfo &b) {
+        return a.minor < b.minor;
+    });
+
+    for (const auto &node : matchedNodes) {
+        results.push_back(node.devPath);
+    }
+
+    return results;
+}
+
+void SerialPort::setUsbBinding(const std::string &usbPath, int portIndex)
+{
+    std::scoped_lock lock(_lifecycleMutex);
+    _usbPath = usbPath;
+    _portIndex = portIndex;
+}
+
+const std::string &SerialPort::getUsbPath() const
+{
+    return _usbPath;
+}
+
+int SerialPort::getPortIndex() const
+{
+    return _portIndex;
 }
 
 bool SerialPort::open()
@@ -55,6 +150,20 @@ bool SerialPort::open(const std::string &device, int baudRate)
     _device = device;
     _baudRate = baudRate;
     _readRemainder.clear();
+
+    // If device is not accessible or empty, attempt dynamic resolution via USB topology binding
+    if ((_device.empty() || access(_device.c_str(), F_OK) != 0) && !_usbPath.empty() && _portIndex >= 0) {
+        auto nodes = resolveUsbTtyNodes(_usbPath);
+        if (_portIndex < static_cast<int>(nodes.size())) {
+            std::string resolved = nodes[_portIndex];
+            if (resolved != _device) {
+                fprintf(stderr, "[embdevenv] SerialPort: re-bound from %s to %s (index %d on usb %s)\n",
+                        _device.empty() ? "(empty)" : _device.c_str(),
+                        resolved.c_str(), _portIndex, _usbPath.c_str());
+                _device = resolved;
+            }
+        }
+    }
 
     if (_device.empty()) {
         fprintf(stderr, "[embdevenv] SerialPort: empty device path\n");

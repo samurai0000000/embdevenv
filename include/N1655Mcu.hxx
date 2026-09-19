@@ -51,6 +51,8 @@ public:
     int getPollIntervalMs() const;
     int getTelnetPort() const;
 
+    void setUsbBinding(const std::string &usbPath, int portIndex);
+
 private:
     void pollWorker();
     bool recoverPrompt(int timeoutMs = 1000);

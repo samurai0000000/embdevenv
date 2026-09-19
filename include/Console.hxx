@@ -46,6 +46,8 @@ public:
     int getBaudRate() const;
     int getTelnetPort() const;
 
+    void setUsbBinding(const std::string &usbPath, int portIndex);
+
 private:
     void readWorker();
 

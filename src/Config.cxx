@@ -180,6 +180,7 @@ bool Config::load(const std::string &customPath)
                     t.lookupValue("model", tc.model);
                     t.lookupValue("description", tc.description);
                     t.lookupValue("enabled", tc.enabled);
+                    t.lookupValue("usb_path", tc.usbPath);
 
                     // Consoles list
                     if (t.exists("consoles")) {
@@ -194,11 +195,12 @@ bool Config::load(const std::string &customPath)
                             }
                             cs.lookupValue("baud_rate", cc.baudRate);
                             cs.lookupValue("telnet_port", cc.telnetPort);
+                            cs.lookupValue("port_index", cc.portIndex);
                             int bufLines = 10000;
                             if (cs.lookupValue("buffer_lines", bufLines)) {
                                 cc.lineBufferCapacity = static_cast<size_t>(bufLines);
                             }
-                            if (!cc.name.empty() || !cc.port.empty()) {
+                            if (!cc.name.empty() || !cc.port.empty() || cc.portIndex >= 0) {
                                 tc.consoles.push_back(cc);
                             }
                         }
@@ -219,6 +221,7 @@ bool Config::load(const std::string &customPath)
                         mcuSetting.lookupValue("prompt", tc.mcu.prompt);
                         mcuSetting.lookupValue("telnet_port", tc.mcu.telnetPort);
                         mcuSetting.lookupValue("poll_interval_ms", tc.mcu.pollIntervalMs);
+                        mcuSetting.lookupValue("port_index", tc.mcu.portIndex);
                     }
 
                     // Flashing group
@@ -289,11 +292,19 @@ bool Config::save()
         t.add("model", libconfig::Setting::TypeString) = tc.model;
         t.add("description", libconfig::Setting::TypeString) = tc.description;
         t.add("enabled", libconfig::Setting::TypeBoolean) = tc.enabled;
+        if (!tc.usbPath.empty()) {
+            t.add("usb_path", libconfig::Setting::TypeString) = tc.usbPath;
+        }
 
         // MCU group
-        if (!tc.mcu.port.empty()) {
+        if (!tc.mcu.port.empty() || tc.mcu.portIndex >= 0) {
             libconfig::Setting &mcu = t.add("mcu", libconfig::Setting::TypeGroup);
-            mcu.add("device", libconfig::Setting::TypeString) = tc.mcu.port;
+            if (!tc.mcu.port.empty()) {
+                mcu.add("device", libconfig::Setting::TypeString) = tc.mcu.port;
+            }
+            if (tc.mcu.portIndex >= 0) {
+                mcu.add("port_index", libconfig::Setting::TypeInt) = tc.mcu.portIndex;
+            }
             mcu.add("baud_rate", libconfig::Setting::TypeInt) = tc.mcu.baudRate;
             mcu.add("prompt", libconfig::Setting::TypeString) = tc.mcu.prompt;
             mcu.add("telnet_port", libconfig::Setting::TypeInt) = tc.mcu.telnetPort;
@@ -310,7 +321,12 @@ bool Config::save()
             for (const auto &cc : tc.consoles) {
                 libconfig::Setting &c = consoles.add(libconfig::Setting::TypeGroup);
                 c.add("name", libconfig::Setting::TypeString) = cc.name;
-                c.add("device", libconfig::Setting::TypeString) = cc.port;
+                if (!cc.port.empty()) {
+                    c.add("device", libconfig::Setting::TypeString) = cc.port;
+                }
+                if (cc.portIndex >= 0) {
+                    c.add("port_index", libconfig::Setting::TypeInt) = cc.portIndex;
+                }
                 c.add("baud_rate", libconfig::Setting::TypeInt) = cc.baudRate;
                 c.add("telnet_port", libconfig::Setting::TypeInt) = cc.telnetPort;
                 c.add("buffer_lines", libconfig::Setting::TypeInt) = static_cast<int>(cc.lineBufferCapacity);

@@ -589,6 +589,7 @@ std::string ToolDispatcher::toolGetConfig()
             {"model", t.model},
             {"description", t.description},
             {"enabled", t.enabled},
+            {"usbPath", t.usbPath},
             {"telnetPort", t.telnetPort},
             {"consolePort", t.consolePort},
             {"consoleBaudRate", t.consoleBaudRate},

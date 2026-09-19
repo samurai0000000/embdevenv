@@ -29,6 +29,7 @@ nlohmann::json FlashResult::toJson() const
         {"success", success},
         {"target", target},
         {"stage", stage},
+        {"mode", mode},
         {"duration_ms", durationMs},
         {"usb_matrix_log", usbMatrixLog},
         {"error", error},
@@ -135,6 +136,19 @@ std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, 
                 buf[bytesRead] = '\0';
                 output += buf;
                 if (onOutput) onOutput(output);
+
+                // Detect usb-matrix wait counter underflow / exhaustion
+                // (e.g. "remaining 4294967295" or "remaining 0 sec(s)" with 0/1 devices)
+                if (output.find("remaining 4294967") != std::string::npos ||
+                    (output.find("waiting for devices (0/1)") != std::string::npos &&
+                     output.find("remaining 0 sec(s)") != std::string::npos)) {
+                    output += "\n[embdevenv] usb-matrix wait-counter underflow/exhaustion detected. Aborting early.\n";
+                    if (onOutput) onOutput(output);
+                    int sysRet = ::system("pkill -f usb-matrix 2>/dev/null");
+                    (void)sysRet;
+                    exitCode = 124;
+                    break;
+                }
             } else if (bytesRead == 0) {
                 break; // EOF
             } else {
@@ -156,10 +170,12 @@ std::string FlashManager::executeCommand(const std::string &cmd, int &exitCode, 
     }
 
     int status = pclose(fp);
-    if (WIFEXITED(status)) {
-        exitCode = WEXITSTATUS(status);
-    } else {
-        exitCode = -1;
+    if (exitCode == 0) {
+        if (WIFEXITED(status)) {
+            exitCode = WEXITSTATUS(status);
+        } else {
+            exitCode = -1;
+        }
     }
     return output;
 }
@@ -230,12 +246,21 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
         return result;
     }
 
+    auto startTime = std::chrono::steady_clock::now();
+    _flashStartTime = startTime;
+
     auto updateState = [&](const std::string &stage, bool success = false, const std::string &error = "") {
         result.stage = stage;
         result.success = success;
+        if (stage == "ram_boot_completed") {
+            result.mode = "ram_boot";
+        }
         if (!error.empty()) {
             result.error = error;
         }
+        auto nowTime = std::chrono::steady_clock::now();
+        result.durationMs = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - startTime).count());
         std::lock_guard<std::mutex> lock(_mutex);
         _lastResult = result;
     };
@@ -259,18 +284,32 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
         }
     }
 
-    std::string fwImage = !params.fwImage.empty() ? Config::resolveHomePath(params.fwImage) : flashCfg.defaultFwImage;
     std::string ustImage = !params.ustImage.empty() ? Config::resolveHomePath(params.ustImage) : flashCfg.ustImage;
     std::string bldImage = !params.bldImage.empty() ? Config::resolveHomePath(params.bldImage) : flashCfg.bldImage;
     std::string chip = !params.chip.empty() ? params.chip : flashCfg.chip;
 
-    if (fwImage.empty()) {
+    // Detect if this is a BLD RAM boot:
+    // 1) User explicitly supplied bldImage but left fwImage empty
+    // 2) fwImage matches bldImage or fwImage name contains "u-boot"
+    bool isRamBoot = false;
+    std::string fwImage;
+    if (!params.bldImage.empty() && params.fwImage.empty()) {
+        isRamBoot = true;
+    } else {
+        fwImage = !params.fwImage.empty() ? Config::resolveHomePath(params.fwImage) : flashCfg.defaultFwImage;
+        if (!bldImage.empty() && (bldImage == fwImage || fwImage.find("u-boot") != std::string::npos)) {
+            isRamBoot = true;
+        }
+    }
+    result.mode = isRamBoot ? "ram_boot" : "emmc_flash";
+
+    if (!isRamBoot && fwImage.empty()) {
         _isFlashing = false;
         updateState("preflight", false, "No firmware package image specified or configured for target '" + params.target + "'");
         return result;
     }
 
-    if (access(fwImage.c_str(), R_OK) != 0) {
+    if (!fwImage.empty() && access(fwImage.c_str(), R_OK) != 0) {
         _isFlashing = false;
         updateState("preflight", false, "Firmware image file not found or unreadable: " + fwImage);
         return result;
@@ -334,13 +373,17 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     if (!bldImage.empty()) {
         cmd += " -b \"" + bldImage + "\"";
     }
-    cmd += " -f \"" + fwImage + "\"";
+    if (!fwImage.empty()) {
+        cmd += " -f \"" + fwImage + "\"";
+    }
 
     int exitCode = 0;
-    auto startTime = std::chrono::steady_clock::now();
     
     auto outputCallback = [&](const std::string &log) {
         result.usbMatrixLog = log;
+        auto nowTime = std::chrono::steady_clock::now();
+        result.durationMs = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - startTime).count());
         std::lock_guard<std::mutex> mlock(_mutex);
         _lastResult = result;
     };
@@ -352,8 +395,35 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
     result.durationMs = static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count());
 
+    bool consoleBootVerified = false;
+    if (exitCode != 0) {
+        // Check if BLD / U-Boot successfully loaded and booted to interactive prompt on console0
+        auto console0 = targetObj->getConsole(0);
+        if (!console0) {
+            auto consoles = targetObj->getConsoles();
+            if (!consoles.empty()) console0 = consoles[0];
+        }
+
+        if (console0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            auto lines = console0->getRecentLines(20);
+            for (const auto &l : lines) {
+                if (l.find("=> ") != std::string::npos ||
+                    l.find("U-Boot 20") != std::string::npos ||
+                    l.find("Hit any key to stop autoboot") != std::string::npos) {
+                    consoleBootVerified = true;
+                    break;
+                }
+            }
+        }
+    }
+
     if (exitCode == 0) {
-        updateState("completed", true);
+        updateState(isRamBoot ? "ram_boot_completed" : "completed", true);
+    } else if (consoleBootVerified) {
+        result.error = "";
+        result.mode = "ram_boot";
+        updateState("ram_boot_completed", true);
     } else {
         updateState("failed", false, "usb-matrix failed with exit code " + std::to_string(exitCode));
     }
@@ -371,7 +441,16 @@ FlashResult FlashManager::getLastResult(const std::string &target) const
         empty.stage = "none";
         return empty;
     }
-    return _lastResult;
+    FlashResult res = _lastResult;
+    if (res.stage == "ram_boot_completed") {
+        res.mode = "ram_boot";
+    }
+    if (_isFlashing.load()) {
+        auto nowTime = std::chrono::steady_clock::now();
+        res.durationMs = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - _flashStartTime).count());
+    }
+    return res;
 }
 
 bool FlashManager::isFlashing() const
