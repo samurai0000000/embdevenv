@@ -83,7 +83,9 @@ public:
 private:
     void readWorker();
 
-    std::mutex _fileLogMutex;
+    void stopLogFileLocked();
+
+    std::recursive_mutex _fileLogMutex;
     int _fileLogListenerId = 0;
     std::string _fileLogPath;
     std::unique_ptr<std::ofstream> _fileLogStream;

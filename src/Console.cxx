@@ -248,8 +248,8 @@ Console::ExpectResult Console::expect(
 
 bool Console::startLogFile(const std::string &path)
 {
-    std::lock_guard<std::mutex> lock(_fileLogMutex);
-    stopLogFile();
+    std::lock_guard<std::recursive_mutex> lock(_fileLogMutex);
+    stopLogFileLocked();
 
     _fileLogStream = std::make_unique<std::ofstream>(path, std::ios::out | std::ios::app);
     if (!_fileLogStream->is_open()) {
@@ -259,7 +259,7 @@ bool Console::startLogFile(const std::string &path)
 
     _fileLogPath = path;
     _fileLogListenerId = addListener([this](const char *data, size_t len) {
-        std::lock_guard<std::mutex> l(_fileLogMutex);
+        std::lock_guard<std::recursive_mutex> l(_fileLogMutex);
         if (_fileLogStream && _fileLogStream->is_open()) {
             _fileLogStream->write(data, len);
             _fileLogStream->flush();
@@ -271,7 +271,12 @@ bool Console::startLogFile(const std::string &path)
 
 void Console::stopLogFile()
 {
-    std::lock_guard<std::mutex> lock(_fileLogMutex);
+    std::lock_guard<std::recursive_mutex> lock(_fileLogMutex);
+    stopLogFileLocked();
+}
+
+void Console::stopLogFileLocked()
+{
     if (_fileLogListenerId > 0) {
         removeListener(_fileLogListenerId);
         _fileLogListenerId = 0;
