@@ -193,7 +193,18 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
     }
 
     if (!cleanData.empty()) {
-        _backend->write(cleanData);
+        if (_backend->isTransferInProgress()) {
+            if (cleanData.find('\x03') != std::string::npos) {
+                _backend->cancelTransfer();
+                static const std::string abortMsg = "\r\n[embdevenv] Serial transfer aborted by user.\r\n";
+                sendData(abortMsg.data(), abortMsg.size());
+            } else {
+                static const std::string lockMsg = "\r\n[embdevenv] Serial transfer in progress. Input locked (Ctrl-C to abort).\r\n";
+                sendData(lockMsg.data(), lockMsg.size());
+            }
+        } else {
+            _backend->write(cleanData);
+        }
     }
 }
 

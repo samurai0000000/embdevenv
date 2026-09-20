@@ -19,6 +19,7 @@
 #include "SerialPort.hxx"
 #include "RingBuffer.hxx"
 #include "TelnetBackend.hxx"
+#include "XyModem.hxx"
 
 namespace embdevenv {
 
@@ -52,6 +53,19 @@ public:
         std::string capturedOutput;
     };
 
+    struct TransferFileResult {
+        bool success = false;
+        std::string protocol;
+        size_t fileSize = 0;
+        size_t bytesSent = 0;
+        int packetsSent = 0;
+        int retries = 0;
+        double elapsedSec = 0.0;
+        double transferRateKBps = 0.0;
+        std::string errorMessage;
+        std::string capturedOutput;
+    };
+
     CatchBootloaderResult catchBootloader(const std::string &prompt = "=>",
                                          const std::string &interruptKey = " ",
                                          int timeoutSec = 30,
@@ -62,6 +76,15 @@ public:
                         int timeoutSec = 60,
                         int charDelayMs = 0,
                         const std::string &logFilePath = "");
+
+    TransferFileResult transferFile(const std::string &filePath,
+                                   XyModem::Protocol proto = XyModem::Protocol::YMODEM,
+                                   bool sendCommand = true,
+                                   const std::string &address = "",
+                                   int timeoutSec = 300);
+
+    bool isTransferInProgress() const override;
+    void cancelTransfer() override;
 
     bool startLogFile(const std::string &path);
     void stopLogFile();
@@ -84,6 +107,11 @@ private:
     void readWorker();
 
     void stopLogFileLocked();
+    void broadcastProgress(const std::string &msg, int excludeListenerId = 0);
+    ssize_t writeRaw(const char *data, size_t len);
+
+    std::atomic<bool> _transferInProgress{false};
+    std::atomic<bool> _transferCancel{false};
 
     std::recursive_mutex _fileLogMutex;
     int _fileLogListenerId = 0;

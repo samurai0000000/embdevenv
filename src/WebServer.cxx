@@ -690,7 +690,22 @@ void WebServer::setupRoutes()
                 continue;
             }
             if (!msg.empty()) {
-                console->write(msg);
+                if (console->isTransferInProgress()) {
+                    if (msg.find('\x03') != std::string::npos) {
+                        console->cancelTransfer();
+                        std::lock_guard<std::mutex> lock(*wsSendMutex);
+                        if (ws.is_open()) {
+                            ws.send("\r\n[embdevenv] Serial transfer aborted by user.\r\n");
+                        }
+                    } else {
+                        std::lock_guard<std::mutex> lock(*wsSendMutex);
+                        if (ws.is_open()) {
+                            ws.send("\r\n[embdevenv] Serial transfer in progress. Input locked (Ctrl-C to abort).\r\n");
+                        }
+                    }
+                } else {
+                    console->write(msg);
+                }
             }
         }
 

@@ -12,6 +12,8 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <algorithm>
+#include <sys/stat.h>
 
 namespace embdevenv {
 
@@ -193,6 +195,23 @@ json ToolDispatcher::getToolDefinitions()
             }}
         },
         {
+            {"name", "embdevenv_console_load"},
+            {"description", "Load binary or image file into target memory over serial console using YMODEM (loady) or XMODEM (loadx) protocol. Native replacement for sx/sb/lrzsz."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"target", {{"type", "string"}, {"description", "Target board name (e.g. 'n1-655-pro')"}}},
+                    {"file_path", {{"type", "string"}, {"description", "Host filesystem path to binary or image file to transfer"}}},
+                    {"protocol", {{"type", "string"}, {"description", "Transfer protocol: 'loady' (YMODEM, default) or 'loadx' (XMODEM)"}, {"enum", json::array({"loady", "loadx", "ymodem", "xmodem"})}}},
+                    {"address", {{"type", "string"}, {"description", "Target memory address (e.g. '0x20000000'). Appended to bootloader load command."}}},
+                    {"send_command", {{"type", "boolean"}, {"description", "If true (default), sends bootloader command (e.g. 'loady 0x20000000') and waits for handshake. If false, assumes target is already waiting."}}},
+                    {"timeout_sec", {{"type", "integer"}, {"description", "Overall transfer timeout in seconds (default: 300)"}}},
+                    {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
+                }},
+                {"required", json::array({"target", "file_path"})}
+            }}
+        },
+        {
             {"name", "embdevenv_get_board_stats"},
             {"description", "Retrieve persistent board usage statistics, wear metrics, flasher history, reboot counts, and 1-year rolling averages from SQLite database."},
             {"inputSchema", {
@@ -336,6 +355,20 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         std::string filePath = args.value("file_path", "");
         std::string console = args.value("console", "");
         return toolConsoleLog(target, action, filePath, console);
+    } else if (name == "embdevenv_console_load") {
+        std::string filePath = args.value("file_path", "");
+        if (filePath.empty() && args.contains("file") && args["file"].is_string()) {
+            filePath = args["file"].get<std::string>();
+        }
+        if (filePath.empty() && args.contains("path") && args["path"].is_string()) {
+            filePath = args["path"].get<std::string>();
+        }
+        std::string protocol = args.value("protocol", "loady");
+        std::string address = args.value("address", "");
+        bool sendCommand = args.value("send_command", true);
+        int timeoutSec = args.value("timeout_sec", 300);
+        std::string console = args.value("console", "");
+        return toolConsoleLoad(target, filePath, protocol, address, sendCommand, timeoutSec, console);
     } else if (name == "embdevenv_get_board_stats") {
         int windowDays = args.value("window_days", 30);
         return toolGetBoardStats(target, windowDays);
@@ -490,6 +523,16 @@ std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, cons
         return "Error: Console not available for '" + targetName + "'";
     }
 
+    if (console->isTransferInProgress()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "Console is currently locked for active serial file transfer"}
+        };
+        return j.dump();
+    }
+
     if (data.empty()) {
         json j = {
             {"target", targetName},
@@ -558,6 +601,16 @@ std::string ToolDispatcher::toolConsoleCatchBootloader(const std::string &target
         return "Error: Target or console not available for '" + targetName + "'";
     }
 
+    if (console->isTransferInProgress()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "Console is currently locked for active serial file transfer"}
+        };
+        return j.dump();
+    }
+
     if (rebootFirst && target->getMcu()) {
         target->getMcu()->reboot();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -597,6 +650,16 @@ std::string ToolDispatcher::toolConsoleExpect(const std::string &targetName,
         return "Error: Target or console not available for '" + targetName + "'";
     }
 
+    if (console->isTransferInProgress()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "Console is currently locked for active serial file transfer"}
+        };
+        return j.dump();
+    }
+
     std::string resolvedLog = !logFilePath.empty() ? Config::resolveHomePath(logFilePath) : "";
     auto res = console->expect(command, patterns, timeoutSec, charDelayMs, resolvedLog);
 
@@ -626,6 +689,16 @@ std::string ToolDispatcher::toolConsoleLog(const std::string &targetName,
     }
 
     if (action == "start") {
+        if (console->isTransferInProgress()) {
+            json j = {
+                {"target", targetName},
+                {"console", console->getName()},
+                {"success", false},
+                {"error", "Console is currently locked for active serial file transfer"}
+            };
+            return j.dump();
+        }
+
         if (filePath.empty()) {
             return "Error: 'file_path' argument is required when action is 'start'";
         }
@@ -651,6 +724,88 @@ std::string ToolDispatcher::toolConsoleLog(const std::string &targetName,
     }
 
     return "Error: Unknown logging action '" + action + "'. Valid actions: start, stop";
+}
+
+std::string ToolDispatcher::toolConsoleLoad(const std::string &targetName,
+                                           const std::string &filePath,
+                                           const std::string &protocol,
+                                           const std::string &address,
+                                           bool sendCommand,
+                                           int timeoutSec,
+                                           const std::string &consoleName)
+{
+    auto target = TargetManager::getInstance().getTarget(targetName);
+    auto console = resolveTargetConsole(target, consoleName);
+    if (!target || !console) {
+        return "Error: Target or console not available for '" + targetName + "'";
+    }
+
+    if (filePath.empty()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "'file_path' argument is required"}
+        };
+        return j.dump();
+    }
+
+    if (console->isTransferInProgress()) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "Console is currently locked for active serial file transfer"}
+        };
+        return j.dump();
+    }
+
+    std::string resolvedPath = Config::resolveHomePath(filePath);
+    struct stat st;
+    if (stat(resolvedPath.c_str(), &st) != 0) {
+        json j = {
+            {"target", targetName},
+            {"console", console->getName()},
+            {"success", false},
+            {"error", "File not found: " + resolvedPath}
+        };
+        return j.dump();
+    }
+
+    XyModem::Protocol proto = XyModem::Protocol::YMODEM;
+    std::string protoLower = protocol;
+    std::transform(protoLower.begin(), protoLower.end(), protoLower.begin(), ::tolower);
+    if (protoLower == "loadx" || protoLower == "xmodem") {
+        proto = XyModem::Protocol::XMODEM;
+    }
+
+    auto res = console->transferFile(resolvedPath, proto, sendCommand, address, timeoutSec);
+
+    UsageDatabase::getInstance().recordEvent(
+        targetName,
+        proto == XyModem::Protocol::YMODEM ? "console_loady" : "console_loadx",
+        res.success ? "success" : "failed",
+        static_cast<int64_t>(res.elapsedSec * 1000.0),
+        res.errorMessage.empty() ? (std::to_string(res.bytesSent) + " bytes") : res.errorMessage
+    );
+
+    json j = {
+        {"target", targetName},
+        {"console", console->getName()},
+        {"success", res.success},
+        {"protocol", res.protocol},
+        {"fileSize", res.fileSize},
+        {"bytesSent", res.bytesSent},
+        {"packetsSent", res.packetsSent},
+        {"retries", res.retries},
+        {"elapsedSec", res.elapsedSec},
+        {"transferRateKBps", res.transferRateKBps},
+        {"capturedOutput", res.capturedOutput}
+    };
+    if (!res.success && !res.errorMessage.empty()) {
+        j["errorMessage"] = res.errorMessage;
+    }
+    return j.dump();
 }
 
 std::string ToolDispatcher::toolGetBoardStats(const std::string &targetName, int windowDays)

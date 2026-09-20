@@ -8,6 +8,9 @@
 #include <chrono>
 #include <cstdio>
 #include <algorithm>
+#include <deque>
+#include <sstream>
+#include <iomanip>
 
 namespace embdevenv {
 
@@ -87,7 +90,36 @@ ssize_t Console::write(const char *data, size_t len)
     if (!_serial.isOpen()) {
         return -1;
     }
+    if (_transferInProgress.load()) {
+        if (data != nullptr && len > 0) {
+            for (size_t i = 0; i < len; ++i) {
+                if (data[i] == 0x03) {
+                    cancelTransfer();
+                    break;
+                }
+            }
+        }
+        return -1;
+    }
     return _serial.write(data, len);
+}
+
+ssize_t Console::writeRaw(const char *data, size_t len)
+{
+    if (!_serial.isOpen() || data == nullptr || len == 0) {
+        return -1;
+    }
+    return _serial.write(data, len);
+}
+
+bool Console::isTransferInProgress() const
+{
+    return _transferInProgress.load();
+}
+
+void Console::cancelTransfer()
+{
+    _transferCancel.store(true);
 }
 
 ssize_t Console::write(const std::string &data)
@@ -289,6 +321,220 @@ Console::ExpectResult Console::expect(
     return result;
 }
 
+void Console::broadcastProgress(const std::string &msg, int excludeListenerId)
+{
+    if (msg.empty()) {
+        return;
+    }
+    std::vector<OutputCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(_listenersMutex);
+        callbacks.reserve(_listeners.size());
+        for (const auto &pair : _listeners) {
+            if (excludeListenerId != 0 && pair.first == excludeListenerId) {
+                continue; // Do NOT leak synthetic progress text into the transfer RX queue!
+            }
+            callbacks.push_back(pair.second);
+        }
+    }
+    for (const auto &cb : callbacks) {
+        if (cb) {
+            cb(msg.data(), msg.size());
+        }
+    }
+}
+
+Console::TransferFileResult Console::transferFile(
+    const std::string &filePath,
+    XyModem::Protocol proto,
+    bool sendCommand,
+    const std::string &address,
+    int timeoutSec)
+{
+    TransferFileResult result;
+    result.protocol = (proto == XyModem::Protocol::YMODEM) ? "loady" : "loadx";
+
+    if (_transferInProgress.exchange(true)) {
+        result.errorMessage = "Console is currently locked for active serial file transfer";
+        return result;
+    }
+
+    struct TransferGuard {
+        std::atomic<bool> &flag;
+        ~TransferGuard() { flag.store(false); }
+    } guard{_transferInProgress};
+
+    _transferCancel.store(false);
+
+    if (!_serial.isOpen()) {
+        result.errorMessage = "Target serial port is not open or disconnected";
+        return result;
+    }
+
+    // Set up thread-safe RX queue for transfer engine
+    struct RxContext {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::deque<uint8_t> queue;
+        std::string postTransferOutput;
+        bool collectingPostOutput = false;
+        std::atomic<bool> active{true};
+    };
+    auto rxCtx = std::make_shared<RxContext>();
+
+    int listenerId = addListener([rxCtx](const char *data, size_t len) {
+        if (!rxCtx->active.load() || data == nullptr || len == 0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(rxCtx->mtx);
+        if (!rxCtx->active.load()) {
+            return;
+        }
+        if (rxCtx->collectingPostOutput) {
+            rxCtx->postTransferOutput.append(data, len);
+            rxCtx->cv.notify_one();
+        } else {
+            for (size_t i = 0; i < len; ++i) {
+                rxCtx->queue.push_back(static_cast<uint8_t>(data[i]));
+            }
+            rxCtx->cv.notify_one();
+        }
+    });
+
+    XyModem::TxFunc txFunc = [this](const char *data, size_t len) -> ssize_t {
+        return writeRaw(data, len);
+    };
+
+    XyModem::RxFunc rxFunc = [rxCtx](int timeoutMs) -> int {
+        std::unique_lock<std::mutex> lock(rxCtx->mtx);
+        if (rxCtx->queue.empty()) {
+            if (!rxCtx->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]{
+                return !rxCtx->queue.empty() || !rxCtx->active.load();
+            })) {
+                return -1;
+            }
+        }
+        if (rxCtx->queue.empty()) {
+            return -1;
+        }
+        uint8_t b = rxCtx->queue.front();
+        rxCtx->queue.pop_front();
+        return static_cast<int>(b);
+    };
+
+    auto transferStartTime = std::chrono::steady_clock::now();
+    int lastPercentBroadcast = -1;
+    std::string protoUpper = (proto == XyModem::Protocol::YMODEM) ? "YMODEM" : "XMODEM";
+
+    XyModem::ProgressFunc progressFunc = [this, listenerId, &protoUpper, transferStartTime, &lastPercentBroadcast](
+        size_t bytesSent, size_t totalBytes, int packetsSent) {
+        int percent = totalBytes > 0 ? static_cast<int>((bytesSent * 100) / totalBytes) : 0;
+        if (percent / 10 > lastPercentBroadcast / 10 || bytesSent == totalBytes) {
+            bool isFirst = (lastPercentBroadcast < 0);
+            lastPercentBroadcast = percent;
+            auto now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(now - transferStartTime).count();
+            double rate = elapsed > 0.001 ? (bytesSent / 1024.0) / elapsed : 0.0;
+            std::ostringstream oss;
+            if (isFirst) {
+                oss << "\r\n";
+            }
+            oss << "[embdevenv] " << protoUpper << " progress: " << percent << "% ("
+                << (bytesSent / 1024) << " KB, " << std::fixed << std::setprecision(1) << rate << " KB/s)\r\n";
+            broadcastProgress(oss.str(), listenerId);
+        }
+    };
+
+    XyModem modem(txFunc, rxFunc, progressFunc);
+
+    if (sendCommand) {
+        std::string cmd = (proto == XyModem::Protocol::YMODEM) ? "loady" : "loadx";
+        if (!address.empty()) {
+            cmd += " " + address;
+        }
+        broadcastProgress("\r\n[embdevenv] Sending bootloader command: " + cmd + "\r\n", listenerId);
+        std::string rawCmd = cmd + "\n";
+        writeRaw(rawCmd.data(), rawCmd.size());
+    } else {
+        broadcastProgress("\r\n", listenerId);
+    }
+
+    broadcastProgress("[embdevenv] Starting " + protoUpper + " transfer: '" + filePath + "'\r\n", listenerId);
+
+    auto modemResult = modem.send(proto, filePath, _transferCancel);
+
+    result.success = modemResult.success;
+    result.fileSize = modemResult.fileSize;
+    result.bytesSent = modemResult.bytesSent;
+    result.packetsSent = modemResult.packetsSent;
+    result.retries = modemResult.retries;
+    result.elapsedSec = modemResult.elapsedSec;
+    result.transferRateKBps = modemResult.transferRateKBps;
+    result.errorMessage = modemResult.errorMessage;
+
+    // Drain post-transfer output from target bootloader (e.g. "## Total Size = ...")
+    {
+        std::unique_lock<std::mutex> lock(rxCtx->mtx);
+        rxCtx->collectingPostOutput = true;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        size_t prevLen = 0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            rxCtx->cv.wait_for(lock, std::chrono::milliseconds(200));
+            if (!rxCtx->postTransferOutput.empty() && rxCtx->postTransferOutput.size() == prevLen) {
+                break;
+            }
+            prevLen = rxCtx->postTransferOutput.size();
+        }
+    }
+
+    // Normalize newlines in capturedOutput (\r\r\n -> \n, \r\n -> \n) and strip leading/trailing control chars/whitespace
+    std::string cleanOutput;
+    cleanOutput.reserve(rxCtx->postTransferOutput.size());
+    for (size_t i = 0; i < rxCtx->postTransferOutput.size(); ++i) {
+        char c = rxCtx->postTransferOutput[i];
+        if (c == '\r') {
+            if (i + 1 < rxCtx->postTransferOutput.size() &&
+                (rxCtx->postTransferOutput[i + 1] == '\r' || rxCtx->postTransferOutput[i + 1] == '\n')) {
+                continue;
+            }
+            cleanOutput += '\n';
+        } else {
+            cleanOutput += c;
+        }
+    }
+    while (!cleanOutput.empty() && static_cast<unsigned char>(cleanOutput.front()) < 0x20 &&
+           cleanOutput.front() != '\n' && cleanOutput.front() != '\t') {
+        cleanOutput.erase(0, 1);
+    }
+    while (!cleanOutput.empty() && (cleanOutput.front() == '\r' || cleanOutput.front() == '\n')) {
+        cleanOutput.erase(0, 1);
+    }
+    while (!cleanOutput.empty() && (cleanOutput.back() == '\r' || cleanOutput.back() == '\n' || cleanOutput.back() == ' ')) {
+        cleanOutput.pop_back();
+    }
+    result.capturedOutput = cleanOutput;
+
+    removeListener(listenerId);
+    {
+        std::lock_guard<std::mutex> lock(rxCtx->mtx);
+        rxCtx->active.store(false);
+    }
+
+    if (result.success) {
+        std::ostringstream oss;
+        oss << "[embdevenv] " << protoUpper << " transfer complete: "
+            << result.bytesSent << " bytes in "
+            << std::fixed << std::setprecision(2) << result.elapsedSec << "s ("
+            << std::fixed << std::setprecision(1) << result.transferRateKBps << " KB/s)\r\n";
+        broadcastProgress(oss.str(), listenerId);
+    } else {
+        broadcastProgress("[embdevenv] " + protoUpper + " transfer failed: " +
+                          result.errorMessage + "\r\n", listenerId);
+    }
+
+    return result;
+}
+
 bool Console::startLogFile(const std::string &path)
 {
     std::lock_guard<std::recursive_mutex> lock(_fileLogMutex);
@@ -443,6 +689,11 @@ void Console::readWorker()
                 std::lock_guard<std::mutex> lock(_lineMutex);
                 for (ssize_t i = 0; i < n; ++i) {
                     char c = buf[i];
+                    if (_transferInProgress.load()) {
+                        if (static_cast<unsigned char>(c) < 0x20 && c != '\r' && c != '\n' && c != '\t') {
+                            continue;
+                        }
+                    }
                     if (c == '\n') {
                         if (_lastCharWasCr) {
                             // \r was already handled; ignore matching \n in \r\n pair

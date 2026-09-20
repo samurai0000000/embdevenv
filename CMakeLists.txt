@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embdevenv VERSION 0.1.6 LANGUAGES CXX)
+project(embdevenv VERSION 0.1.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,6 +73,7 @@ set(SOURCES
     src/AimonGatewayClient.cxx
     src/StandaloneMcpServer.cxx
     src/InstanceLock.cxx
+    src/XyModem.cxx
 )
 
 add_executable(embdevenv ${SOURCES})
@@ -98,3 +99,14 @@ endif()
 if(SQLITE3_LIBRARY_DIRS)
     target_link_directories(embdevenv PRIVATE ${SQLITE3_LIBRARY_DIRS})
 endif()
+
+add_executable(test_xymodem
+    test/TestXyModem.cxx
+    src/XyModem.cxx
+)
+target_include_directories(test_xymodem PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_xymodem PRIVATE
+    Threads::Threads
+)

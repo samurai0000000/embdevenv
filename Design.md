@@ -60,6 +60,7 @@ The daemon is implemented under `namespace embdevenv`:
 
 ### 3.1 Serial & Data Storage Subsystems
 - **`SerialPort`**: Encapsulates POSIX serial communication via file descriptors, termios raw-mode configuration (8N1, baud rates up to 921600, no flow control), non-blocking timed `poll()` reads, line extraction, thread-safe writes, and automatic reconnection.
+- **`XyModem`**: Decoupled, transport-agnostic XMODEM and YMODEM sender protocol engine with CRC-16-CCITT and 8-bit checksum verification, automatic packet retry, and clean cancellation sequences.
 - **`RingBuffer<T>`**: Thread-safe circular FIFO buffer protected by `std::mutex`, providing bounded in-memory retention and non-destructive window reads (`getLatest()`, `getAll()`).
 - **`TelemetrySample` & `TelemetryStore`**: Structured data models capturing timestamped snapshots of power states, temperature, fan speed, and dynamic rail voltages, with JSON serialization and historical retention.
 
@@ -131,6 +132,13 @@ To solve the limitation where only one process can attach to a serial device at 
 - All connected operators receive console output in real-time. Any operator input is forwarded cleanly to the UART console.
 - If no operator is connected, output continues buffering in the circular line buffer (up to 10,000 lines) viewable via the web interface or REST API.
 
+### 6.1 Serial Binary Transfer Stream Isolation (`loadx` & `loady`)
+During binary serial transfers (`embdevenv_console_load`), the console enters an exclusive transfer state:
+- **Stream Isolation**: Interactive terminal input from Telnet and WebSocket sessions is temporarily locked to prevent keystrokes from corrupting active XMODEM/YMODEM packets.
+- **Operator Cancellation**: Operators can abort an active transfer at any time by pressing `Ctrl-C` (`0x03`) in Telnet or the web console, triggering a clean `CAN` sequence to the bootloader.
+- **Progress Broadcasting**: In-flight transfer progress (percentage, transferred size, KB/s) is periodically synthesized and broadcast across active Telnet and WebSocket listeners.
+- **Line Buffer Cleanliness**: Binary control bytes (`SOH`, `STX`, `ACK`, `NAK`) from the target are filtered out of the web console line buffer to prevent visual pollution.
+
 ---
 
 ## 7. Web Dashboard & REST API
@@ -156,7 +164,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 
 ## 8. MCP Server & Gateway Integration
 
-`embdevenv` exposes 16 consolidated tools for AI agent interaction:
+`embdevenv` exposes 17 consolidated tools for AI agent interaction:
 
 | MCP Tool Name | Description |
 | :--- | :--- |
@@ -171,6 +179,7 @@ The embedded web server serves both a responsive UI and REST endpoints:
 | `embdevenv_console_catch_bootloader` | Native U-Boot autoboot interrupt and prompt catcher |
 | `embdevenv_console_expect` | Send paced command and wait for multiple sentinel string patterns |
 | `embdevenv_console_log` | Start or stop continuous serial console file logging on host disk |
+| `embdevenv_console_load` | Load binary or image file into target memory over serial console using YMODEM (loady) or XMODEM (loadx) |
 | `embdevenv_get_board_stats` | Retrieve persistent board usage statistics, wear metrics, flasher history, and reboot counts |
 | `embdevenv_get_config` | Retrieve active daemon configuration and settings |
 | `embdevenv_flash_target` | Flash firmware package to an embedded target board via usb-matrix |

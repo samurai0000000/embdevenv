@@ -26,6 +26,9 @@ public:
 
     virtual void onClientConnect() {}
     virtual void onClientDisconnect() {}
+
+    virtual bool isTransferInProgress() const { return false; }
+    virtual void cancelTransfer() {}
 };
 
 } // namespace embdevenv

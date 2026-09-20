@@ -46,6 +46,13 @@ private:
                                       const std::string &action,
                                       const std::string &filePath = "",
                                       const std::string &consoleName = "");
+    static std::string toolConsoleLoad(const std::string &target,
+                                       const std::string &filePath,
+                                       const std::string &protocol = "loady",
+                                       const std::string &address = "",
+                                       bool sendCommand = true,
+                                       int timeoutSec = 300,
+                                       const std::string &consoleName = "");
     static std::string toolGetBoardStats(const std::string &target, int windowDays = 30);
     static std::string toolGetConfig();
     static std::string toolFlashTarget(const std::string &target,
