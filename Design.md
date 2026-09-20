@@ -156,31 +156,29 @@ The embedded web server serves both a responsive UI and REST endpoints:
 
 ## 8. MCP Server & Gateway Integration
 
-`embdevenv` exposes 21 structured tools for AI agent interaction:
+`embdevenv` exposes 16 consolidated tools for AI agent interaction:
 
 | MCP Tool Name | Description |
 | :--- | :--- |
-| `embdevenv_list_targets` | List all configured embedded targets and configurations |
-| `embdevenv_get_target_status` | Comprehensive status of a specific target |
-| `embdevenv_mcu_power_on` | Power on target hardware via MCU |
-| `embdevenv_mcu_power_off` | Power off target hardware via MCU |
-| `embdevenv_mcu_reboot` | Power cycle / reboot target board via MCU |
-| `embdevenv_mcu_usb_download` | Put target board into USB download / boot mode for flashing |
-| `embdevenv_mcu_get_power_state` | Query whether target is currently ON or OFF |
-| `embdevenv_mcu_get_telemetry` | Retrieve latest telemetry snapshot |
-| `embdevenv_mcu_get_voltages` | Retrieve breakdown of all voltage rails |
-| `embdevenv_mcu_get_temperature` | Retrieve core thermal temperature in &deg;C |
-| `embdevenv_mcu_get_fan_speed` | Retrieve cooling fan speed in RPM |
-| `embdevenv_mcu_get_telemetry_history` | Retrieve historical telemetry samples |
-| `embdevenv_mcu_send_command` | Execute arbitrary MCU command and return output |
+| `embdevenv_list_targets` | List all configured embedded targets, models, enabled state, and ports |
+| `embdevenv_get_target_status` | Comprehensive status of a specific target (consoles, MCU telemetry, Telnet servers) |
+| `embdevenv_mcu_power` | Manage target board power states via MCU (`power_on`, `power_off`, `reboot`, `usb_download`) |
+| `embdevenv_mcu_get_telemetry` | Retrieve latest telemetry snapshot or filtered metric (`all`, `voltages`, `thermal`, `fan`, `power`) |
+| `embdevenv_mcu_get_telemetry_history` | Retrieve historical telemetry samples over time |
 | `embdevenv_console_read` | Read recent serial console buffer lines |
-| `embdevenv_console_write` | Send command strings or keystrokes to console |
+| `embdevenv_console_write` | Send command strings or keystrokes to console with optional character pacing |
 | `embdevenv_console_clear` | Clear console buffer memory |
-| `embdevenv_telnet_get_status` | Get Telnet server port and active session count |
-| `embdevenv_get_config` | Retrieve active daemon configuration |
+| `embdevenv_console_catch_bootloader` | Native U-Boot autoboot interrupt and prompt catcher |
+| `embdevenv_console_expect` | Send paced command and wait for multiple sentinel string patterns |
+| `embdevenv_console_log` | Start or stop continuous serial console file logging on host disk |
+| `embdevenv_get_board_stats` | Retrieve persistent board usage statistics, wear metrics, flasher history, and reboot counts |
+| `embdevenv_get_config` | Retrieve active daemon configuration and settings |
 | `embdevenv_flash_target` | Flash firmware package to an embedded target board via usb-matrix |
-| `embdevenv_usb_list_devices` | Scan host USB buses for connected targets and recovery devices |
 | `embdevenv_flash_get_status` | Get status and log output of the most recent firmware flashing operation |
+| `embdevenv_usb_list_devices` | Scan host USB buses for connected targets and recovery devices |
+
+> [!IMPORTANT]
+> **Direct MCU Command Prohibition**: Sending raw/arbitrary CLI commands to the MCU firmware is disabled and strictly prohibited to safeguard target EEPROMs, preserve power sequencing invariants, and prevent serial desynchronization. All power and telemetry operations must use `embdevenv_mcu_power` and `embdevenv_mcu_get_telemetry`.
 
 ---
 

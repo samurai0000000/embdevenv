@@ -177,6 +177,11 @@ bool AimonGatewayClient::sendRegistration()
         {"params", {
             {"subsystem", "embdevenv"},
             {"name", "embdevenv"},
+            {"display_name", "Embedded Dev"},
+            {"short_name", "EmbDev"},
+            {"priority", 30},
+            {"web_port", _webPort > 0 ? _webPort : 3886},
+            {"web_path", "/"},
             {"description", "Embedded hardware development environment, target console demuxer, and MCU telemetry gateway"},
             {"tools", ToolDispatcher::getToolDefinitions()}
         }}

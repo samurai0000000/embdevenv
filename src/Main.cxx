@@ -141,6 +141,7 @@ int main(int argc, char **argv)
     if (mcpCfg.mode == "aimon") {
         fprintf(stderr, "[embdevenv] MCP mode: aimon gateway (%s:%d)\n",
                 mcpCfg.aimonHost.c_str(), mcpCfg.aimonPort);
+        embdevenv::AimonGatewayClient::getInstance().setWebPort(webCfg.port);
         embdevenv::AimonGatewayClient::getInstance().start(mcpCfg.aimonHost, mcpCfg.aimonPort);
     } else if (mcpCfg.mode == "standalone") {
         fprintf(stderr, "[embdevenv] MCP mode: standalone server (port %d)\n",

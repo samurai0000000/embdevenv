@@ -209,24 +209,24 @@ static std::string getMcpHintForPath(const std::string &path, const std::string 
                 auto j = nlohmann::json::parse(body);
                 std::string action = j.value("action", "");
                 if (action == "on") {
-                    return "Use official MCP tool 'embdevenv_mcu_power_on' with argument {\"target\": \"" + target + "\"}.";
+                    return "Use official MCP tool 'embdevenv_mcu_power' with argument {\"target\": \"" + target + "\", \"action\": \"power_on\"}.";
                 } else if (action == "off") {
-                    return "Use official MCP tool 'embdevenv_mcu_power_off' with argument {\"target\": \"" + target + "\"}.";
+                    return "Use official MCP tool 'embdevenv_mcu_power' with argument {\"target\": \"" + target + "\", \"action\": \"power_off\"}.";
                 } else if (action == "reboot") {
-                    return "Use official MCP tool 'embdevenv_mcu_reboot' with argument {\"target\": \"" + target + "\"}.";
+                    return "Use official MCP tool 'embdevenv_mcu_power' with argument {\"target\": \"" + target + "\", \"action\": \"reboot\"}.";
                 }
             } catch (...) {}
         }
-        return "Use official MCP tool 'embdevenv_mcu_power_on', 'embdevenv_mcu_power_off', or 'embdevenv_mcu_reboot' with argument {\"target\": \"" + target + "\"}.";
+        return "Use official MCP tool 'embdevenv_mcu_power' with argument {\"target\": \"" + target + "\", \"action\": \"power_on\"|\"power_off\"|\"reboot\"}.";
     }
     if (path.find("/mcu/command") != std::string::npos) {
-        return "Use official MCP tool 'embdevenv_mcu_send_command' with argument {\"target\": \"" + target + "\", \"command\": \"<command>\"}.";
+        return "Direct raw MCU commands are disabled and prohibited.";
     }
     if (path.find("/mcu/telemetry/history") != std::string::npos) {
         return "Use official MCP tool 'embdevenv_mcu_get_telemetry_history' with argument {\"target\": \"" + target + "\"}.";
     }
     if (path.find("/mcu/telemetry") != std::string::npos || path.find("/mcu") != std::string::npos) {
-        return "Use official MCP tool 'embdevenv_mcu_get_telemetry', 'embdevenv_mcu_get_voltages', 'embdevenv_mcu_get_temperature', or 'embdevenv_mcu_get_fan_speed' with argument {\"target\": \"" + target + "\"}.";
+        return "Use official MCP tool 'embdevenv_mcu_get_telemetry' with argument {\"target\": \"" + target + "\", \"metric\": \"all\"|\"voltages\"|\"thermal\"|\"fan\"|\"power\"}.";
     }
     if (path.find("/console/write") != std::string::npos) {
         return "Use official MCP tool 'embdevenv_console_write' or 'embdevenv_console_expect' with argument {\"target\": \"" + target + "\", \"command\": \"<command>\"}.";

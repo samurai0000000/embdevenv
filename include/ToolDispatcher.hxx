@@ -20,17 +20,12 @@ public:
 private:
     static std::string toolListTargets();
     static std::string toolGetTargetStatus(const std::string &target);
-    static std::string toolMcuPowerOn(const std::string &target);
-    static std::string toolMcuPowerOff(const std::string &target);
-    static std::string toolMcuReboot(const std::string &target);
-    static std::string toolMcuUsbDownload(const std::string &target, bool doubleReset);
-    static std::string toolMcuGetPowerState(const std::string &target);
-    static std::string toolMcuGetTelemetry(const std::string &target);
-    static std::string toolMcuGetVoltages(const std::string &target);
-    static std::string toolMcuGetTemperature(const std::string &target);
-    static std::string toolMcuGetFanSpeed(const std::string &target);
+    static std::string toolMcuPower(const std::string &target,
+                                    const std::string &action,
+                                    bool doubleReset = true);
+    static std::string toolMcuGetTelemetry(const std::string &target,
+                                           const std::string &metric = "all");
     static std::string toolMcuGetTelemetryHistory(const std::string &target, size_t count);
-    static std::string toolMcuSendCommand(const std::string &target, const std::string &cmd, int timeoutMs);
     static std::string toolConsoleRead(const std::string &target, size_t lines, const std::string &consoleName = "");
     static std::string toolConsoleWrite(const std::string &target, const std::string &data, int charDelayMs = 0, const std::string &consoleName = "");
     static std::string toolConsoleClear(const std::string &target, const std::string &consoleName = "");
@@ -47,13 +42,11 @@ private:
                                          int charDelayMs,
                                          const std::string &logFilePath,
                                          const std::string &consoleName = "");
-    static std::string toolConsoleStartLog(const std::string &target,
-                                           const std::string &filePath,
-                                           const std::string &consoleName = "");
-    static std::string toolConsoleStopLog(const std::string &target,
-                                          const std::string &consoleName = "");
+    static std::string toolConsoleLog(const std::string &target,
+                                      const std::string &action,
+                                      const std::string &filePath = "",
+                                      const std::string &consoleName = "");
     static std::string toolGetBoardStats(const std::string &target, int windowDays = 30);
-    static std::string toolTelnetGetStatus(const std::string &target);
     static std::string toolGetConfig();
     static std::string toolFlashTarget(const std::string &target,
                                        const std::string &chip,

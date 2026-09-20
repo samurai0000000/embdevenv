@@ -26,6 +26,9 @@ public:
 
     bool isConnected() const;
 
+    void setWebPort(int port) { _webPort = port; }
+    int getWebPort() const { return _webPort; }
+
 private:
     AimonGatewayClient();
     ~AimonGatewayClient();
@@ -43,6 +46,7 @@ private:
 
     std::string _host;
     int _port;
+    int _webPort = 0;
 
     std::atomic<bool> _running;
     std::atomic<bool> _connected;
