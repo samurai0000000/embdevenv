@@ -127,51 +127,79 @@ Console::CatchBootloaderResult Console::catchBootloader(
     CatchBootloaderResult result;
     auto startTime = std::chrono::steady_clock::now();
 
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool matched = false;
-    std::string streamTail;
+    struct BootloaderContext {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::atomic<bool> active{true};
+        bool matched = false;
+        std::string streamTail;
+        std::string capturedOutput;
+    };
+    auto ctx = std::make_shared<BootloaderContext>();
 
-    int listenerId = addListener([&](const char *data, size_t len) {
-        std::lock_guard<std::mutex> lock(mtx);
-        result.capturedOutput.append(data, len);
-        streamTail.append(data, len);
-        if (streamTail.size() > 4096) {
-            streamTail.erase(0, streamTail.size() - 4096);
+    int listenerId = addListener([ctx, prompt](const char *data, size_t len) {
+        if (!ctx->active.load()) return;
+        std::lock_guard<std::mutex> lock(ctx->mtx);
+        if (!ctx->active.load()) return;
+        ctx->capturedOutput.append(data, len);
+        ctx->streamTail.append(data, len);
+        if (ctx->streamTail.size() > 4096) {
+            ctx->streamTail.erase(0, ctx->streamTail.size() - 4096);
         }
-        if (streamTail.find(prompt) != std::string::npos) {
-            matched = true;
-            cv.notify_one();
+        if (ctx->streamTail.find(prompt) != std::string::npos) {
+            ctx->matched = true;
+            ctx->cv.notify_one();
         }
     });
 
-    int pollMs = pollIntervalMs > 0 ? pollIntervalMs : 50;
+    // Default to 150ms keystroke pacing (instead of 50ms) to prevent USB-UART bridge buffer overflow
+    int pollMs = pollIntervalMs > 0 ? pollIntervalMs : 150;
     int maxWaitSec = timeoutSec > 0 ? timeoutSec : 30;
+    int consecutiveWriteErrors = 0;
 
-    while (!matched) {
+    while (!ctx->matched) {
         auto now = std::chrono::steady_clock::now();
         double elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - startTime).count();
         if (elapsed >= maxWaitSec) {
             break;
         }
 
-        // Send interrupt key/character into serial
-        write(interruptKey);
+        if (!_serial.isOpen()) {
+            break;
+        }
 
-        std::unique_lock<std::mutex> lock(mtx);
-        if (cv.wait_for(lock, std::chrono::milliseconds(pollMs), [&]{ return matched; })) {
+        // Send interrupt key/character into serial with error checking
+        ssize_t nWritten = write(interruptKey);
+        if (nWritten < 0) {
+            consecutiveWriteErrors++;
+            if (consecutiveWriteErrors >= 3) {
+                // Device write failure (e.g. USB stall or disconnect); abort to avoid crashing USB hub
+                break;
+            }
+        } else {
+            consecutiveWriteErrors = 0;
+        }
+
+        std::unique_lock<std::mutex> lock(ctx->mtx);
+        if (ctx->cv.wait_for(lock, std::chrono::milliseconds(pollMs), [&]{ return ctx->matched; })) {
             break;
         }
     }
 
     removeListener(listenerId);
 
+    {
+        std::lock_guard<std::mutex> lock(ctx->mtx);
+        ctx->active.store(false);
+    }
+
     auto endTime = std::chrono::steady_clock::now();
     result.elapsedSec = std::chrono::duration_cast<std::chrono::duration<double>>(endTime - startTime).count();
-    result.success = matched;
-    if (matched) {
+    result.success = ctx->matched;
+    if (ctx->matched) {
         result.matchedPrompt = prompt;
     }
+    result.capturedOutput = std::move(ctx->capturedOutput);
 
     return result;
 }
@@ -191,28 +219,37 @@ Console::ExpectResult Console::expect(
         logOut = std::make_unique<std::ofstream>(logFilePath, std::ios::out | std::ios::app);
     }
 
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool matched = false;
-    std::string matchedPattern;
-    std::string streamTail;
+    struct ExpectContext {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::atomic<bool> active{true};
+        bool matched = false;
+        std::string matchedPattern;
+        std::string streamTail;
+        std::string capturedOutput;
+        std::ofstream *logOut = nullptr;
+    };
+    auto ctx = std::make_shared<ExpectContext>();
+    ctx->logOut = logOut.get();
 
-    int listenerId = addListener([&](const char *data, size_t len) {
-        std::lock_guard<std::mutex> lock(mtx);
-        result.capturedOutput.append(data, len);
-        if (logOut && logOut->is_open()) {
-            logOut->write(data, len);
-            logOut->flush();
+    int listenerId = addListener([ctx, &patterns](const char *data, size_t len) {
+        if (!ctx->active.load()) return;
+        std::lock_guard<std::mutex> lock(ctx->mtx);
+        if (!ctx->active.load()) return;
+        ctx->capturedOutput.append(data, len);
+        if (ctx->logOut && ctx->logOut->is_open()) {
+            ctx->logOut->write(data, len);
+            ctx->logOut->flush();
         }
-        streamTail.append(data, len);
-        if (streamTail.size() > 8192) {
-            streamTail.erase(0, streamTail.size() - 8192);
+        ctx->streamTail.append(data, len);
+        if (ctx->streamTail.size() > 8192) {
+            ctx->streamTail.erase(0, ctx->streamTail.size() - 8192);
         }
         for (const auto &pat : patterns) {
-            if (!pat.empty() && streamTail.find(pat) != std::string::npos) {
-                matched = true;
-                matchedPattern = pat;
-                cv.notify_one();
+            if (!pat.empty() && ctx->streamTail.find(pat) != std::string::npos) {
+                ctx->matched = true;
+                ctx->matchedPattern = pat;
+                ctx->cv.notify_one();
                 break;
             }
         }
@@ -228,11 +265,16 @@ Console::ExpectResult Console::expect(
 
     int maxWaitSec = timeoutSec > 0 ? timeoutSec : 60;
     {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait_for(lock, std::chrono::seconds(maxWaitSec), [&]{ return matched; });
+        std::unique_lock<std::mutex> lock(ctx->mtx);
+        ctx->cv.wait_for(lock, std::chrono::seconds(maxWaitSec), [&]{ return ctx->matched; });
     }
 
     removeListener(listenerId);
+
+    {
+        std::lock_guard<std::mutex> lock(ctx->mtx);
+        ctx->active.store(false);
+    }
 
     if (logOut && logOut->is_open()) {
         logOut->close();
@@ -240,8 +282,9 @@ Console::ExpectResult Console::expect(
 
     auto endTime = std::chrono::steady_clock::now();
     result.elapsedSec = std::chrono::duration_cast<std::chrono::duration<double>>(endTime - startTime).count();
-    result.success = matched;
-    result.matchedPattern = matchedPattern;
+    result.success = ctx->matched;
+    result.matchedPattern = std::move(ctx->matchedPattern);
+    result.capturedOutput = std::move(ctx->capturedOutput);
 
     return result;
 }

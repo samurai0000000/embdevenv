@@ -308,19 +308,29 @@ ssize_t SerialPort::read(char *buf, size_t maxLen, int timeoutMs)
 
     int ret = poll(&pfd, 1, timeoutMs);
     if (ret < 0) {
+        if (errno == EINTR || errno == EAGAIN) {
+            return 0;
+        }
         return -1;
     }
     if (ret == 0) {
         return 0; // Timeout
     }
 
-    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+    if (pfd.revents & (POLLHUP | POLLNVAL)) {
         return -1;
     }
 
-    if (pfd.revents & POLLIN) {
+    if (pfd.revents & (POLLIN | POLLERR)) {
         std::lock_guard<std::mutex> lock(_readMutex);
-        return ::read(fd, buf, maxLen);
+        ssize_t n = ::read(fd, buf, maxLen);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                return 0;
+            }
+            return -1;
+        }
+        return n;
     }
 
     return 0;
@@ -411,14 +421,27 @@ ssize_t SerialPort::write(const char *data, size_t len)
         pfd.revents = 0;
 
         int ret = poll(&pfd, 1, 1000);
-        if (ret <= 0) {
+        if (ret < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            return totalWritten > 0 ? (ssize_t)totalWritten : -1;
+        }
+        if (ret == 0) {
+            return totalWritten > 0 ? (ssize_t)totalWritten : -1;
+        }
+
+        if (pfd.revents & (POLLHUP | POLLNVAL)) {
             return totalWritten > 0 ? (ssize_t)totalWritten : -1;
         }
 
         ssize_t n = ::write(fd, data + totalWritten, len - totalWritten);
         if (n > 0) {
             totalWritten += n;
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        } else if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                continue;
+            }
             return totalWritten > 0 ? (ssize_t)totalWritten : -1;
         }
     }
