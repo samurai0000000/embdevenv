@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embdevenv VERSION 0.1.7 LANGUAGES CXX)
+project(embdevenv VERSION 0.1.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -74,6 +74,7 @@ set(SOURCES
     src/StandaloneMcpServer.cxx
     src/InstanceLock.cxx
     src/XyModem.cxx
+    src/TerminalSanitizer.cxx
 )
 
 add_executable(embdevenv ${SOURCES})
@@ -110,3 +111,50 @@ target_include_directories(test_xymodem PRIVATE
 target_link_libraries(test_xymodem PRIVATE
     Threads::Threads
 )
+
+add_executable(test_terminal_sanitizer
+    test/TestTerminalSanitizer.cxx
+    src/TerminalSanitizer.cxx
+)
+target_include_directories(test_terminal_sanitizer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_terminal_sanitizer PRIVATE
+    Threads::Threads
+)
+
+add_executable(test_mcu_polling
+    test/TestMcuPolling.cxx
+    src/N1655Mcu.cxx
+    src/N1655Target.cxx
+    src/Target.cxx
+    src/TargetFactory.cxx
+    src/Console.cxx
+    src/SerialPort.cxx
+    src/TelemetryStore.cxx
+    src/TelnetServer.cxx
+    src/TerminalSanitizer.cxx
+    src/UsageDatabase.cxx
+    src/Config.cxx
+    src/XyModem.cxx
+)
+target_include_directories(test_mcu_polling PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+    ${CONFIGPP_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
+)
+target_link_libraries(test_mcu_polling PRIVATE
+    Threads::Threads
+    ${CONFIGPP_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
+)
+if(CONFIGPP_LIBRARY_DIRS)
+    target_link_directories(test_mcu_polling PRIVATE ${CONFIGPP_LIBRARY_DIRS})
+endif()
+if(SQLITE3_LIBRARY_DIRS)
+    target_link_directories(test_mcu_polling PRIVATE ${SQLITE3_LIBRARY_DIRS})
+endif()
+
+

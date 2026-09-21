@@ -14,6 +14,18 @@
 
 namespace embdevenv {
 
+namespace {
+struct ScopedActivityGuard {
+    ScopedActivityGuard(std::function<void(bool)> hook) : _hook(std::move(hook)) {
+        if (_hook) _hook(true);
+    }
+    ~ScopedActivityGuard() {
+        if (_hook) _hook(false);
+    }
+    std::function<void(bool)> _hook;
+};
+}
+
 Console::Console(const std::string &name, const std::string &port, int baudRate,
                  size_t lineBufferCapacity, int telnetPort)
     : _name(name)
@@ -156,6 +168,13 @@ Console::CatchBootloaderResult Console::catchBootloader(
     int timeoutSec,
     int pollIntervalMs)
 {
+    ActivityHook hook;
+    {
+        std::lock_guard<std::mutex> lock(_activityHookMutex);
+        hook = _activityHook;
+    }
+    ScopedActivityGuard activityGuard(hook);
+
     CatchBootloaderResult result;
     auto startTime = std::chrono::steady_clock::now();
 
@@ -243,6 +262,13 @@ Console::ExpectResult Console::expect(
     int charDelayMs,
     const std::string &logFilePath)
 {
+    ActivityHook hook;
+    {
+        std::lock_guard<std::mutex> lock(_activityHookMutex);
+        hook = _activityHook;
+    }
+    ScopedActivityGuard activityGuard(hook);
+
     ExpectResult result;
     auto startTime = std::chrono::steady_clock::now();
 
@@ -351,6 +377,13 @@ Console::TransferFileResult Console::transferFile(
     const std::string &address,
     int timeoutSec)
 {
+    ActivityHook hook;
+    {
+        std::lock_guard<std::mutex> lock(_activityHookMutex);
+        hook = _activityHook;
+    }
+    ScopedActivityGuard activityGuard(hook);
+
     TransferFileResult result;
     result.protocol = (proto == XyModem::Protocol::YMODEM) ? "loady" : "loadx";
 
@@ -647,6 +680,12 @@ int Console::getTelnetPort() const
 void Console::setUsbBinding(const std::string &usbPath, int portIndex)
 {
     _serial.setUsbBinding(usbPath, portIndex);
+}
+
+void Console::setActivityHook(ActivityHook hook)
+{
+    std::lock_guard<std::mutex> lock(_activityHookMutex);
+    _activityHook = std::move(hook);
 }
 
 void Console::readWorker()

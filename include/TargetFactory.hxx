@@ -28,7 +28,7 @@ struct McuConfig {
     int baudRate = 115200;
     std::string prompt = "#";
     int telnetPort = 0;
-    int pollIntervalMs = 2000;
+    int pollIntervalMs = 15000;
     int portIndex = -1;
 };
 
@@ -58,7 +58,7 @@ struct TargetConfig {
     int consoleBaudRate = 115200;
     std::string mcuPort;
     int mcuBaudRate = 115200;
-    int mcuPollIntervalMs = 2000;
+    int mcuPollIntervalMs = 15000;
 };
 
 class TargetFactory {

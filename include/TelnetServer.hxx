@@ -15,6 +15,7 @@
 #include <mutex>
 #include <netinet/in.h>
 #include "TelnetBackend.hxx"
+#include "TerminalSanitizer.hxx"
 
 namespace embdevenv {
 
@@ -38,6 +39,7 @@ private:
     int _clientFd;
     struct sockaddr_in _addr;
     ITelnetBackend *_backend;
+    TerminalSanitizer _sanitizer;
     std::atomic<bool> _running;
     std::thread _workerThread;
     mutable std::mutex _writeMutex;

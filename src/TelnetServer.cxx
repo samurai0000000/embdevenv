@@ -130,8 +130,8 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
         return;
     }
 
-    std::string cleanData;
-    cleanData.reserve(len);
+    std::string telnetClean;
+    telnetClean.reserve(len);
 
     size_t i = 0;
     while (i < len) {
@@ -143,7 +143,7 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
             unsigned char cmd = static_cast<unsigned char>(buf[i + 1]);
             if (cmd == IAC) {
                 // Escaped IAC byte
-                cleanData += static_cast<char>(IAC);
+                telnetClean += static_cast<char>(IAC);
                 i += 2;
             } else if (cmd == WILL || cmd == WONT || cmd == DO || cmd == DONT) {
                 // 3-byte command
@@ -163,34 +163,13 @@ void TelnetSession::processIncomingBytes(const char *buf, size_t len)
                 // 2-byte simple command
                 i += 2;
             }
-        } else if (c == '\0') {
-            // Telnet CR-NUL or null byte filtering
-            ++i;
-        } else if (c == 0x1b && i + 1 < len && buf[i + 1] == '[') {
-            // Check for automated terminal emulator responses such as:
-            // - Cursor Position Report (CPR): \x1b[<row>;<col>R or \x1b[<row>R
-            // - Device Attributes (DA): \x1b[?<attrs>c or \x1b[<attrs>c
-            size_t j = i + 2;
-            if (j < len && buf[j] == '?') {
-                ++j;
-            }
-            size_t startDigits = j;
-            while (j < len && (std::isdigit(static_cast<unsigned char>(buf[j])) || buf[j] == ';')) {
-                ++j;
-            }
-            if (j > startDigits && j < len && (buf[j] == 'R' || buf[j] == 'c')) {
-                // Drop automated terminal emulator response (e.g. \x1b[28R, \x1b[20R)
-                // so it does not corrupt the target's serial console input.
-                i = j + 1;
-                continue;
-            }
-            cleanData += static_cast<char>(c);
-            ++i;
         } else {
-            cleanData += static_cast<char>(c);
+            telnetClean += static_cast<char>(c);
             ++i;
         }
     }
+
+    std::string cleanData = _sanitizer.process(telnetClean);
 
     if (!cleanData.empty()) {
         if (_backend->isTransferInProgress()) {

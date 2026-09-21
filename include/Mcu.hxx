@@ -35,6 +35,32 @@ public:
     virtual const std::string &getPort() const = 0;
     virtual int getBaudRate() const = 0;
 
+    virtual void pausePolling() {}
+    virtual void resumePolling() {}
+    virtual bool isPollingPaused() const { return false; }
+
+    struct ScopedPollPause {
+        explicit ScopedPollPause(Mcu *mcu) : _mcu(mcu) {
+            if (_mcu != nullptr) {
+                _mcu->pausePolling();
+            }
+        }
+        explicit ScopedPollPause(const std::shared_ptr<Mcu> &mcu) : _mcu(mcu ? mcu.get() : nullptr) {
+            if (_mcu != nullptr) {
+                _mcu->pausePolling();
+            }
+        }
+        ~ScopedPollPause() {
+            if (_mcu != nullptr) {
+                _mcu->resumePolling();
+            }
+        }
+        ScopedPollPause(const ScopedPollPause &) = delete;
+        ScopedPollPause &operator=(const ScopedPollPause &) = delete;
+    private:
+        Mcu *_mcu = nullptr;
+    };
+
     const std::string &getTargetName() const { return _targetName; }
     void setTargetName(const std::string &name) { _targetName = name; }
 

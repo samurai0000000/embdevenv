@@ -44,6 +44,32 @@ public:
     void setMcu(std::shared_ptr<Mcu> mcu);
     std::shared_ptr<Mcu> getMcu() const;
 
+    void pauseMcuPolling();
+    void resumeMcuPolling();
+    bool isMcuPollingPaused() const;
+
+    struct ScopedMcuPollPause {
+        explicit ScopedMcuPollPause(Target *target) : _target(target) {
+            if (_target != nullptr) {
+                _target->pauseMcuPolling();
+            }
+        }
+        explicit ScopedMcuPollPause(const std::shared_ptr<Target> &target) : _target(target ? target.get() : nullptr) {
+            if (_target != nullptr) {
+                _target->pauseMcuPolling();
+            }
+        }
+        ~ScopedMcuPollPause() {
+            if (_target != nullptr) {
+                _target->resumeMcuPolling();
+            }
+        }
+        ScopedMcuPollPause(const ScopedMcuPollPause &) = delete;
+        ScopedMcuPollPause &operator=(const ScopedMcuPollPause &) = delete;
+    private:
+        Target *_target = nullptr;
+    };
+
     void addTelnetServer(std::shared_ptr<TelnetServer> telnetServer);
     const std::vector<std::shared_ptr<TelnetServer>> &getTelnetServers() const;
     std::shared_ptr<TelnetServer> getTelnetServer() const;

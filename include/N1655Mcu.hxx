@@ -22,7 +22,7 @@ namespace embdevenv {
 
 class N1655Mcu : public Mcu, public ITelnetBackend {
 public:
-    N1655Mcu(const std::string &port, int baudRate = 115200, int pollIntervalMs = 2000, int telnetPort = 0);
+    N1655Mcu(const std::string &port, int baudRate = 115200, int pollIntervalMs = 15000, int telnetPort = 0);
     ~N1655Mcu() override;
 
     bool start() override;
@@ -35,6 +35,10 @@ public:
     bool reboot() override;
     bool resetUsbDownload(bool doubleReset = true) override;
     std::string sendCommand(const std::string &cmd, int timeoutMs = 2000) override;
+
+    void pausePolling() override;
+    void resumePolling() override;
+    bool isPollingPaused() const override;
 
     ssize_t write(const char *data, size_t len) override;
     ssize_t write(const std::string &data) override;
@@ -70,6 +74,7 @@ private:
     std::atomic<bool> _running;
     std::atomic<bool> _connected;
     std::atomic<int> _activeClients;
+    std::atomic<int> _pollPauseCount{0};
     std::thread _workerThread;
     mutable std::mutex _cmdMutex;
     std::condition_variable _cv;

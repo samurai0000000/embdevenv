@@ -18,13 +18,14 @@ namespace embdevenv {
 N1655Mcu::N1655Mcu(const std::string &port, int baudRate, int pollIntervalMs, int telnetPort)
     : _port(port)
     , _baudRate(baudRate)
-    , _pollIntervalMs(pollIntervalMs > 0 ? pollIntervalMs : 2000)
+    , _pollIntervalMs(pollIntervalMs > 0 ? pollIntervalMs : 15000)
     , _telnetPort(telnetPort)
     , _serial(_port, _baudRate)
     , _telemetryStore(std::make_shared<TelemetryStore>(1000))
     , _running(false)
     , _connected(false)
     , _activeClients(0)
+    , _pollPauseCount(0)
     , _nextListenerId(1)
 {
 }
@@ -32,6 +33,25 @@ N1655Mcu::N1655Mcu(const std::string &port, int baudRate, int pollIntervalMs, in
 N1655Mcu::~N1655Mcu()
 {
     stop();
+}
+
+void N1655Mcu::pausePolling()
+{
+    _pollPauseCount.fetch_add(1);
+}
+
+void N1655Mcu::resumePolling()
+{
+    int prev = _pollPauseCount.fetch_sub(1);
+    if (prev <= 1) {
+        _pollPauseCount.store(0);
+        _cv.notify_all();
+    }
+}
+
+bool N1655Mcu::isPollingPaused() const
+{
+    return _pollPauseCount.load() > 0;
 }
 
 bool N1655Mcu::start()
@@ -118,7 +138,9 @@ ssize_t N1655Mcu::write(const char *data, size_t len)
         _connected = true;
     }
 
-    return _serial.write(data, len);
+    ssize_t written = _serial.write(data, len);
+    _cv.notify_all();
+    return written;
 }
 
 ssize_t N1655Mcu::write(const std::string &data)
@@ -148,6 +170,7 @@ void N1655Mcu::removeListener(int listenerId)
 void N1655Mcu::onClientConnect()
 {
     _activeClients.fetch_add(1);
+    _cv.notify_all();
 }
 
 void N1655Mcu::onClientDisconnect()
@@ -155,6 +178,7 @@ void N1655Mcu::onClientDisconnect()
     int cur = _activeClients.load();
     while (cur > 0 && !_activeClients.compare_exchange_weak(cur, cur - 1)) {
     }
+    _cv.notify_all();
 }
 
 void N1655Mcu::broadcastOutput(const char *data, size_t len)
@@ -178,9 +202,11 @@ void N1655Mcu::broadcastOutput(const char *data, size_t len)
 bool N1655Mcu::recoverPrompt(int timeoutMs)
 {
     const char ctrlC = '\003';
-    _serial.write(&ctrlC, 1);
-    _serial.write("\r", 1);
-    _serial.flush();
+    if (_serial.write(&ctrlC, 1) < 0 || _serial.write("\r", 1) < 0) {
+        _connected = false;
+        _serial.close();
+        return false;
+    }
 
     char buf[128];
     auto start = std::chrono::steady_clock::now();
@@ -195,6 +221,10 @@ bool N1655Mcu::recoverPrompt(int timeoutMs)
             if (resp.find('#') != std::string::npos) {
                 return true;
             }
+        } else if (n < 0) {
+            _connected = false;
+            _serial.close();
+            return false;
         }
     }
 
@@ -214,13 +244,17 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
         _port = _serial.getDevice();
     }
 
-    _serial.flush();
+    recoverPrompt(500);
 
     std::string fullCmd = cmd;
     if (fullCmd.empty() || fullCmd.back() != '\r') {
         fullCmd += '\r';
     }
-    _serial.write(fullCmd);
+    if (_serial.write(fullCmd) < 0) {
+        _connected = false;
+        _serial.close();
+        return "";
+    }
 
     std::string response;
     char buf[256];
@@ -399,6 +433,15 @@ void N1655Mcu::pollWorker()
             continue;
         }
 
+        // If polling is suppressed by an active serial console operation, sleep until resumed
+        if (isPollingPaused()) {
+            std::unique_lock<std::mutex> lock(_cmdMutex);
+            _cv.wait_for(lock, std::chrono::milliseconds(500), [this] {
+                return !_running || !isPollingPaused();
+            });
+            continue;
+        }
+
         // If Telnet client is connected, handle interactive streaming
         if (_activeClients.load() > 0) {
             ssize_t n = 0;
@@ -411,6 +454,11 @@ void N1655Mcu::pollWorker()
             if (n > 0) {
                 readBuf[n] = '\0';
                 broadcastOutput(readBuf, static_cast<size_t>(n));
+            } else if (n < 0) {
+                std::lock_guard<std::mutex> lock(_cmdMutex);
+                _connected = false;
+                _serial.close();
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
             continue;
         }
@@ -419,53 +467,66 @@ void N1655Mcu::pollWorker()
         {
             std::lock_guard<std::mutex> lock(_cmdMutex);
             if (_serial.isOpen()) {
-                _serial.flush();
-                _serial.write("bs\r");
-
-                std::string block;
-                auto start = std::chrono::steady_clock::now();
-                while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - start).count() < 1200) {
-                    ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
-                    if (n > 0) {
-                        readBuf[n] = '\0';
-                        block += readBuf;
-                        if (block.find("RPM") != std::string::npos) {
+                ssize_t w = _serial.write("bs\r");
+                if (w < 0) {
+                    _connected = false;
+                    _serial.close();
+                } else {
+                    std::string block;
+                    bool readErr = false;
+                    auto start = std::chrono::steady_clock::now();
+                    while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - start).count() < 1200) {
+                        ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
+                        if (n > 0) {
+                            readBuf[n] = '\0';
+                            block += readBuf;
+                            if (block.find("RPM") != std::string::npos) {
+                                break;
+                            }
+                        } else if (n < 0) {
+                            readErr = true;
+                            _connected = false;
+                            _serial.close();
                             break;
                         }
                     }
-                }
 
-                // Restore prompt with Ctrl-C
-                const char ctrlC = '\003';
-                _serial.write(&ctrlC, 1);
-                _serial.write("\r", 1);
-                _serial.flush();
+                    // Restore prompt with Ctrl-C to exit bs monitor mode
+                    const char ctrlC = '\003';
+                    _serial.write(&ctrlC, 1);
+                    _serial.write("\r", 1);
+                    auto drainStart = std::chrono::steady_clock::now();
+                    while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - drainStart).count() < 150) {
+                        ssize_t dn = _serial.read(readBuf, sizeof(readBuf) - 1, 30);
+                        if (dn <= 0) break;
+                    }
 
-                // Drain trailing bytes
-                auto drainStart = std::chrono::steady_clock::now();
-                while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::steady_clock::now() - drainStart).count() < 200) {
-                    ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 50);
-                    if (n <= 0) break;
-                }
-
-                if (!block.empty()) {
-                    TelemetrySample sample;
-                    if (parseTelemetryBlock(block, sample)) {
-                        _telemetryStore->addSample(sample);
-                        if (!_targetName.empty()) {
-                            UsageDatabase::getInstance().recordTelemetrySample(
-                                _targetName, sample.powerOn, sample.temperatureC, sample.fanRpm, sample.voltages);
+                    if (!readErr && _serial.isOpen() && !block.empty()) {
+                        TelemetrySample sample;
+                        if (parseTelemetryBlock(block, sample)) {
+                            _telemetryStore->addSample(sample);
+                            if (!_targetName.empty()) {
+                                UsageDatabase::getInstance().recordTelemetrySample(
+                                    _targetName, sample.powerOn, sample.temperatureC, sample.fanRpm, sample.voltages);
+                            }
                         }
                     }
                 }
             }
         }
 
+        // Apply adaptive backoff when target power is off (e.g. 30s instead of active 15s)
+        int currentIntervalMs = _pollIntervalMs;
+        TelemetrySample latestSample;
+        if (_telemetryStore->getLatest(latestSample) && !latestSample.powerOn) {
+            currentIntervalMs = std::max(_pollIntervalMs, 30000);
+        }
+
         std::unique_lock<std::mutex> lock(_cmdMutex);
-        _cv.wait_for(lock, std::chrono::milliseconds(_pollIntervalMs), [this] {
-            return !_running;
+        _cv.wait_for(lock, std::chrono::milliseconds(currentIntervalMs), [this] {
+            return !_running || isPollingPaused() || _activeClients.load() > 0;
         });
     }
 }
@@ -486,14 +547,19 @@ nlohmann::json N1655Mcu::getStatusJson() const
     j["telnetPort"] = _telnetPort;
 
     TelemetrySample latest;
-    if (_telemetryStore->getLatest(latest)) {
+    bool hasSample = _telemetryStore->getLatest(latest);
+    if (_connected.load() && hasSample) {
         j["powerOn"] = latest.powerOn;
         j["temperatureC"] = latest.temperatureC;
         j["fanRpm"] = latest.fanRpm;
         j["latestSample"] = latest.toJson();
     } else {
         j["powerOn"] = false;
-        j["latestSample"] = nullptr;
+        if (hasSample) {
+            j["latestSample"] = latest.toJson();
+        } else {
+            j["latestSample"] = nullptr;
+        }
     }
 
     return j;

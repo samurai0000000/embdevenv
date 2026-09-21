@@ -9,6 +9,7 @@
 #include "Config.hxx"
 #include "FlashManager.hxx"
 #include "UsageDatabase.hxx"
+#include "TerminalSanitizer.hxx"
 #include <sstream>
 #include <thread>
 #include <chrono>
@@ -478,9 +479,11 @@ std::string ToolDispatcher::toolMcuGetTelemetry(const std::string &targetName,
     } else if (metric == "power") {
         json mcuJson = target->getMcu()->getStatusJson();
         bool powerOn = mcuJson.value("powerOn", false);
+        bool connected = mcuJson.value("connected", false);
         json resp = {
             {"target", targetName},
-            {"powerOn", powerOn}
+            {"powerOn", powerOn},
+            {"connected", connected}
         };
         return resp.dump();
     } else if (metric == "all" || metric.empty()) {
@@ -564,6 +567,9 @@ std::string ToolDispatcher::toolConsoleWrite(const std::string &targetName, cons
         processed.replace(pos, 2, "\n");
         pos += 1;
     }
+
+    // Filter automated terminal feedback (CPR, DA, DSR) if present in raw input
+    processed = TerminalSanitizer::sanitize(processed);
 
     ssize_t written = console->writePaced(processed, charDelayMs);
     json j = {

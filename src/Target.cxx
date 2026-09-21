@@ -124,6 +124,13 @@ void Target::addConsole(std::shared_ptr<Console> console)
 {
     if (console != nullptr) {
         _consoles.push_back(console);
+        console->setActivityHook([this](bool active) {
+            if (active) {
+                pauseMcuPolling();
+            } else {
+                resumeMcuPolling();
+            }
+        });
     }
 }
 
@@ -158,6 +165,25 @@ void Target::setMcu(std::shared_ptr<Mcu> mcu)
 std::shared_ptr<Mcu> Target::getMcu() const
 {
     return _mcu;
+}
+
+void Target::pauseMcuPolling()
+{
+    if (_mcu != nullptr) {
+        _mcu->pausePolling();
+    }
+}
+
+void Target::resumeMcuPolling()
+{
+    if (_mcu != nullptr) {
+        _mcu->resumePolling();
+    }
+}
+
+bool Target::isMcuPollingPaused() const
+{
+    return _mcu != nullptr && _mcu->isPollingPaused();
 }
 
 void Target::addTelnetServer(std::shared_ptr<TelnetServer> telnetServer)

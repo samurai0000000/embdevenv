@@ -103,6 +103,9 @@ public:
 
     void setUsbBinding(const std::string &usbPath, int portIndex);
 
+    using ActivityHook = std::function<void(bool active)>;
+    void setActivityHook(ActivityHook hook);
+
 private:
     void readWorker();
 
@@ -136,6 +139,9 @@ private:
     mutable std::mutex _listenersMutex;
     int _nextListenerId;
     std::vector<std::pair<int, OutputCallback>> _listeners;
+
+    mutable std::mutex _activityHookMutex;
+    ActivityHook _activityHook;
 };
 
 } // namespace embdevenv

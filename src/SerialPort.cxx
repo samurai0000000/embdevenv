@@ -151,8 +151,8 @@ bool SerialPort::open(const std::string &device, int baudRate)
     _baudRate = baudRate;
     _readRemainder.clear();
 
-    // If device is not accessible or empty, attempt dynamic resolution via USB topology binding
-    if ((_device.empty() || access(_device.c_str(), F_OK) != 0) && !_usbPath.empty() && _portIndex >= 0) {
+    // If USB path topology is configured, resolve current active device node
+    if (!_usbPath.empty() && _portIndex >= 0) {
         auto nodes = resolveUsbTtyNodes(_usbPath);
         if (_portIndex < static_cast<int>(nodes.size())) {
             std::string resolved = nodes[_portIndex];

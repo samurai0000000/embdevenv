@@ -8,6 +8,7 @@
 #include "TargetManager.hxx"
 #include "FlashManager.hxx"
 #include "UsageDatabase.hxx"
+#include "TerminalSanitizer.hxx"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <cstdio>
@@ -551,6 +552,7 @@ void WebServer::setupRoutes()
                 data = "\r";
             }
 
+            data = TerminalSanitizer::sanitize(data);
             ssize_t written = console->write(data);
             nlohmann::json resp;
             resp["success"] = (written >= 0);
@@ -680,6 +682,7 @@ void WebServer::setupRoutes()
         // Set timeout to 1 second so loop can check _running periodically
         ws.set_read_timeout(1);
 
+        TerminalSanitizer wsSanitizer;
         std::string msg;
         while (_running.load()) {
             auto res = ws.read(msg);
@@ -690,8 +693,12 @@ void WebServer::setupRoutes()
                 continue;
             }
             if (!msg.empty()) {
+                std::string cleanMsg = wsSanitizer.process(msg);
+                if (cleanMsg.empty()) {
+                    continue;
+                }
                 if (console->isTransferInProgress()) {
-                    if (msg.find('\x03') != std::string::npos) {
+                    if (cleanMsg.find('\x03') != std::string::npos) {
                         console->cancelTransfer();
                         std::lock_guard<std::mutex> lock(*wsSendMutex);
                         if (ws.is_open()) {
@@ -704,7 +711,7 @@ void WebServer::setupRoutes()
                         }
                     }
                 } else {
-                    console->write(msg);
+                    console->write(cleanMsg);
                 }
             }
         }
@@ -2416,6 +2423,10 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                 });
 
                 term.onData((data) => {
+                    // Filter automated terminal emulator responses (CPR \x1b[<row>;<col>R, DA \x1b[?<attrs>c, etc.)
+                    if (/^\x1b\[\??[0-9;]*[Rcnty]$/.test(data) || /^\x1b\[>[0-9;]*c$/.test(data)) {
+                        return;
+                    }
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(data);
                     }

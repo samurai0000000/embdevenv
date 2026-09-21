@@ -276,6 +276,9 @@ FlashResult FlashManager::flashTarget(const FlashParams &params)
         return result;
     }
 
+    // Suppress MCU polling for the duration of the flashing session
+    Target::ScopedMcuPollPause mcuPollPause(targetObj);
+
     // Look up target configuration defaults
     TargetFlashConfig flashCfg;
     for (const auto &tc : Config::getInstance().getTargets()) {
