@@ -16,8 +16,56 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 namespace embdevenv {
+
+namespace {
+
+std::mutex g_ttyClaimMutex;
+std::unordered_map<std::string, SerialPort *> g_ttyClaims;
+
+bool sysfsPathMatchesUsbPort(const std::string &resolvedPath,
+                             const std::string &usbPath)
+{
+    if (usbPath.empty()) {
+        return false;
+    }
+    const std::string asDir = "/" + usbPath + "/";
+    const std::string asIface = "/" + usbPath + ":";
+    return resolvedPath.find(asDir) != std::string::npos ||
+           resolvedPath.find(asIface) != std::string::npos;
+}
+
+void releaseTtyClaim(SerialPort *owner, const std::string &device)
+{
+    if (owner == nullptr || device.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_ttyClaimMutex);
+    auto it = g_ttyClaims.find(device);
+    if (it != g_ttyClaims.end() && it->second == owner) {
+        g_ttyClaims.erase(it);
+    }
+}
+
+bool claimTty(SerialPort *owner, const std::string &device)
+{
+    if (owner == nullptr || device.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_ttyClaimMutex);
+    auto it = g_ttyClaims.find(device);
+    if (it != g_ttyClaims.end() && it->second != owner) {
+        return false;
+    }
+    g_ttyClaims[device] = owner;
+    return true;
+}
+
+} // namespace
+
 
 SerialPort::SerialPort()
     : _device("")
@@ -86,8 +134,7 @@ std::vector<std::string> SerialPort::resolveUsbTtyNodes(const std::string &usbPa
         }
 
         std::string resolvedPath(rp);
-        // Check if resolved sysfs path contains usbPath (e.g. "4-10.3.2")
-        if (resolvedPath.find(usbPath) == std::string::npos) {
+        if (!sysfsPathMatchesUsbPort(resolvedPath, usbPath)) {
             continue;
         }
 
@@ -145,6 +192,7 @@ bool SerialPort::open(const std::string &device, int baudRate)
     if (_fd >= 0) {
         ::close(_fd);
         _fd = -1;
+        releaseTtyClaim(this, _device);
     }
 
     _device = device;
@@ -162,6 +210,11 @@ bool SerialPort::open(const std::string &device, int baudRate)
                         resolved.c_str(), _portIndex, _usbPath.c_str());
                 _device = resolved;
             }
+        } else {
+            fprintf(stderr, "[embdevenv] SerialPort: usb %s index %d matched %zu nodes; not opening fallback %s\n",
+                    _usbPath.c_str(), _portIndex, nodes.size(),
+                    _device.empty() ? "(empty)" : _device.c_str());
+            return false;
         }
     }
 
@@ -193,6 +246,14 @@ bool SerialPort::open(const std::string &device, int baudRate)
         return false;
     }
 
+    if (!claimTty(this, _device)) {
+        fprintf(stderr, "[embdevenv] SerialPort: %s already claimed by another port in this process\n",
+                _device.c_str());
+        ::close(_fd);
+        _fd = -1;
+        return false;
+    }
+
     if (_lastOpenError != 0) {
         fprintf(stderr, "[embdevenv] SerialPort: connected to %s successfully\n", _device.c_str());
         _lastOpenError = 0;
@@ -208,6 +269,7 @@ void SerialPort::close()
         ::close(_fd);
         _fd = -1;
     }
+    releaseTtyClaim(this, _device);
     _readRemainder.clear();
 }
 
