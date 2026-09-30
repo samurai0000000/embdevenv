@@ -91,6 +91,8 @@ public:
     bool isLoggingToFile() const;
 
     std::vector<std::string> getRecentLines(size_t count = 100) const;
+    std::vector<std::string> getCompletedLines(size_t count = 100) const;
+    std::string getPartialLine() const;
     void clearBuffer();
 
     int addListener(OutputCallback callback) override;
@@ -115,6 +117,7 @@ private:
 
     std::atomic<bool> _transferInProgress{false};
     std::atomic<bool> _transferCancel{false};
+    std::atomic<int> _transferListenerId{0};
 
     std::recursive_mutex _fileLogMutex;
     int _fileLogListenerId = 0;

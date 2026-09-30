@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embdevenv VERSION 0.1.9 LANGUAGES CXX)
+project(embdevenv VERSION 0.1.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -155,6 +155,37 @@ if(CONFIGPP_LIBRARY_DIRS)
 endif()
 if(SQLITE3_LIBRARY_DIRS)
     target_link_directories(test_mcu_polling PRIVATE ${SQLITE3_LIBRARY_DIRS})
+endif()
+
+add_executable(test_serial_isolation
+    test/TestSerialIsolation.cxx
+    src/SerialPort.cxx
+    src/Console.cxx
+    src/TelnetServer.cxx
+    src/TerminalSanitizer.cxx
+    src/XyModem.cxx
+    src/N1655Mcu.cxx
+    src/TelemetryStore.cxx
+    src/UsageDatabase.cxx
+    src/Config.cxx
+)
+target_include_directories(test_serial_isolation PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+    ${CONFIGPP_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
+)
+target_link_libraries(test_serial_isolation PRIVATE
+    Threads::Threads
+    ${CONFIGPP_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
+)
+if(CONFIGPP_LIBRARY_DIRS)
+    target_link_directories(test_serial_isolation PRIVATE ${CONFIGPP_LIBRARY_DIRS})
+endif()
+if(SQLITE3_LIBRARY_DIRS)
+    target_link_directories(test_serial_isolation PRIVATE ${SQLITE3_LIBRARY_DIRS})
 endif()
 
 

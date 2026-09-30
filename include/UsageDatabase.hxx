@@ -47,11 +47,15 @@ public:
                                bool powerOn,
                                double tempC,
                                int fanRpm,
-                               const std::map<std::string, double> &voltages);
+                               const std::map<std::string, double> &voltages,
+                               double maxTempC = 0.0,
+                               const std::map<std::string, double> &minVoltages = {},
+                               bool faultDetected = false);
 
     // Queries
     nlohmann::json queryBoardStats(const std::string &boardName, int windowDays = 30);
     nlohmann::json queryRecentEvents(const std::string &boardName, int limit = 50);
+    int getPragmaInt(const std::string &pragmaSql) const;
 
     // Maintenance / Rollups
     void performRollupAndPrune(int rawRetentionDays = 90, int rollupRetentionDays = 365);

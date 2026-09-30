@@ -18,10 +18,13 @@ class Mcu {
 public:
     virtual ~Mcu() = default;
 
+    enum class PowerState { UNKNOWN, OFF, ON };
+
     virtual bool start() = 0;
     virtual void stop() = 0;
     virtual bool isRunning() const = 0;
     virtual bool isConnected() const = 0;
+    virtual PowerState getPowerState() const { return PowerState::UNKNOWN; }
 
     virtual bool powerOn() = 0;
     virtual bool powerOff() = 0;

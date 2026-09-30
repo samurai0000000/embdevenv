@@ -94,6 +94,111 @@ SerialPort::~SerialPort()
     close();
 }
 
+std::string SerialPort::resolveUsbPortNode(const std::string &usbPath,
+                                          int targetChannel,
+                                          const std::string &sysfsClassTty)
+{
+    if (usbPath.empty() || targetChannel < 0) {
+        return "";
+    }
+
+    DIR *dir = opendir(sysfsClassTty.c_str());
+    if (!dir) {
+        return "";
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') {
+            continue;
+        }
+
+        std::string name = entry->d_name;
+        bool isCh9344 = (name.rfind("ttyCH9344USB", 0) == 0);
+        bool isUsb = (name.rfind("ttyUSB", 0) == 0);
+        bool isAcm = (name.rfind("ttyACM", 0) == 0);
+
+        if (!isCh9344 && !isUsb && !isAcm) {
+            continue;
+        }
+
+        std::string devLink = sysfsClassTty + "/" + name + "/device";
+        char resolved[PATH_MAX];
+        char *rp = realpath(devLink.c_str(), resolved);
+        if (!rp) {
+            continue;
+        }
+
+        std::string resolvedPath(rp);
+        if (!sysfsPathMatchesUsbPort(resolvedPath, usbPath)) {
+            continue;
+        }
+
+        int hwChannel = -1;
+
+        if (isCh9344) {
+            // Tier 1: For CH9344, driver allocates 8 minors per chip.
+            // Invariant hardware channel = minor % 8.
+            std::string devFile = sysfsClassTty + "/" + name + "/dev";
+            FILE *df = fopen(devFile.c_str(), "r");
+            if (df) {
+                int major = 0, minor = 0;
+                if (fscanf(df, "%d:%d", &major, &minor) == 2) {
+                    hwChannel = minor % 8;
+                }
+                fclose(df);
+            }
+        } else {
+            // Tier 2: For generic ttyUSB/ttyACM, read bInterfaceNumber from sysfs.
+            std::vector<std::string> ifacePaths = {
+                sysfsClassTty + "/" + name + "/device/bInterfaceNumber",
+                sysfsClassTty + "/" + name + "/device/../bInterfaceNumber",
+                resolvedPath + "/bInterfaceNumber",
+                resolvedPath + "/../bInterfaceNumber"
+            };
+
+            for (const auto &ifacePath : ifacePaths) {
+                FILE *f = fopen(ifacePath.c_str(), "r");
+                if (f) {
+                    char buf[32];
+                    if (fgets(buf, sizeof(buf), f)) {
+                        char *end = nullptr;
+                        long val = strtol(buf, &end, 16);
+                        if (end != buf) {
+                            hwChannel = static_cast<int>(val);
+                        }
+                    }
+                    fclose(f);
+                    if (hwChannel >= 0) {
+                        break;
+                    }
+                }
+            }
+
+            // Fallback for devices without bInterfaceNumber
+            if (hwChannel < 0) {
+                std::string devFile = sysfsClassTty + "/" + name + "/dev";
+                FILE *df = fopen(devFile.c_str(), "r");
+                if (df) {
+                    int major = 0, minor = 0;
+                    if (fscanf(df, "%d:%d", &major, &minor) == 2) {
+                        hwChannel = minor;
+                    }
+                    fclose(df);
+                }
+            }
+        }
+
+        if (hwChannel == targetChannel) {
+            closedir(dir);
+            return "/dev/" + name;
+        }
+    }
+    closedir(dir);
+
+    return "";
+}
+
 std::vector<std::string> SerialPort::resolveUsbTtyNodes(const std::string &usbPath)
 {
     std::vector<std::string> results;
@@ -201,18 +306,17 @@ bool SerialPort::open(const std::string &device, int baudRate)
 
     // If USB path topology is configured, resolve current active device node
     if (!_usbPath.empty() && _portIndex >= 0) {
-        auto nodes = resolveUsbTtyNodes(_usbPath);
-        if (_portIndex < static_cast<int>(nodes.size())) {
-            std::string resolved = nodes[_portIndex];
+        std::string resolved = resolveUsbPortNode(_usbPath, _portIndex);
+        if (!resolved.empty()) {
             if (resolved != _device) {
-                fprintf(stderr, "[embdevenv] SerialPort: re-bound from %s to %s (index %d on usb %s)\n",
+                fprintf(stderr, "[embdevenv] SerialPort: re-bound from %s to %s (channel %d on usb %s)\n",
                         _device.empty() ? "(empty)" : _device.c_str(),
                         resolved.c_str(), _portIndex, _usbPath.c_str());
                 _device = resolved;
             }
         } else {
-            fprintf(stderr, "[embdevenv] SerialPort: usb %s index %d matched %zu nodes; not opening fallback %s\n",
-                    _usbPath.c_str(), _portIndex, nodes.size(),
+            fprintf(stderr, "[embdevenv] SerialPort: usb %s channel %d not found in sysfs; not opening fallback %s\n",
+                    _usbPath.c_str(), _portIndex,
                     _device.empty() ? "(empty)" : _device.c_str());
             return false;
         }

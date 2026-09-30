@@ -43,6 +43,9 @@ public:
     bool reconnect();
 
     // USB topology binding
+    static std::string resolveUsbPortNode(const std::string &usbPath,
+                                          int targetChannel,
+                                          const std::string &sysfsClassTty = "/sys/class/tty");
     static std::vector<std::string> resolveUsbTtyNodes(const std::string &usbPath);
     void setUsbBinding(const std::string &usbPath, int portIndex);
     const std::string &getUsbPath() const;

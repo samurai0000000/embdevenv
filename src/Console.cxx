@@ -393,9 +393,12 @@ Console::TransferFileResult Console::transferFile(
     }
 
     struct TransferGuard {
-        std::atomic<bool> &flag;
-        ~TransferGuard() { flag.store(false); }
-    } guard{_transferInProgress};
+        Console &cons;
+        ~TransferGuard() {
+            cons._transferListenerId.store(0);
+            cons._transferInProgress.store(false);
+        }
+    } guard{*this};
 
     _transferCancel.store(false);
 
@@ -433,6 +436,7 @@ Console::TransferFileResult Console::transferFile(
             rxCtx->cv.notify_one();
         }
     });
+    _transferListenerId.store(listenerId);
 
     XyModem::TxFunc txFunc = [this](const char *data, size_t len) -> ssize_t {
         return writeRaw(data, len);
@@ -627,6 +631,18 @@ std::vector<std::string> Console::getRecentLines(size_t count) const
     return lines;
 }
 
+std::vector<std::string> Console::getCompletedLines(size_t count) const
+{
+    std::lock_guard<std::mutex> lock(_lineMutex);
+    return _lineBuffer.getLatest(count);
+}
+
+std::string Console::getPartialLine() const
+{
+    std::lock_guard<std::mutex> lock(_lineMutex);
+    return _partialLine;
+}
+
 void Console::clearBuffer()
 {
     std::lock_guard<std::mutex> lock(_lineMutex);
@@ -697,23 +713,38 @@ void Console::readWorker()
             if (_serial.open(_port, _baudRate)) {
                 _connected = true;
                 _port = _serial.getDevice();
+                fprintf(stderr, "[embdevenv] Console '%s' self-healed on %s\n",
+                        _name.c_str(), _port.c_str());
             } else {
                 _connected = false;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                // Periodic self-healing probe: check every 2 seconds without spamming
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
                 continue;
             }
         }
 
         ssize_t n = _serial.read(buf, sizeof(buf), 100);
         if (n > 0) {
-            // Broadcast raw bytes to all listeners (e.g. Telnet clients)
+            bool transferActive = _transferInProgress.load();
+            int transferId = _transferListenerId.load();
+
+            // Broadcast raw bytes (routed exclusively to transfer listener during active transfer)
             {
                 std::vector<OutputCallback> callbacks;
                 {
                     std::lock_guard<std::mutex> lock(_listenersMutex);
-                    callbacks.reserve(_listeners.size());
-                    for (const auto &pair : _listeners) {
-                        callbacks.push_back(pair.second);
+                    if (transferActive && transferId > 0) {
+                        for (const auto &pair : _listeners) {
+                            if (pair.first == transferId) {
+                                callbacks.push_back(pair.second);
+                                break;
+                            }
+                        }
+                    } else if (!transferActive) {
+                        callbacks.reserve(_listeners.size());
+                        for (const auto &pair : _listeners) {
+                            callbacks.push_back(pair.second);
+                        }
                     }
                 }
                 for (const auto &cb : callbacks) {
@@ -723,16 +754,11 @@ void Console::readWorker()
                 }
             }
 
-            // Buffer lines for web UI / logging
-            {
+            // Buffer lines for web UI / logging (completely suppressed during binary file transfers)
+            if (!transferActive) {
                 std::lock_guard<std::mutex> lock(_lineMutex);
                 for (ssize_t i = 0; i < n; ++i) {
                     char c = buf[i];
-                    if (_transferInProgress.load()) {
-                        if (static_cast<unsigned char>(c) < 0x20 && c != '\r' && c != '\n' && c != '\t') {
-                            continue;
-                        }
-                    }
                     if (c == '\n') {
                         if (_lastCharWasCr) {
                             // \r was already handled; ignore matching \n in \r\n pair
@@ -759,11 +785,14 @@ void Console::readWorker()
                     }
                 }
             }
+        } else if (n == 0) {
+            // Target quiet or clock stopped: normal condition, DO NOT CLOSE FD!
+            continue;
         } else if (n < 0) {
-            // Read error or device disconnected
+            // Confirmed fatal error or disconnect: close FD and let loop self-heal
             _connected = false;
             _serial.close();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
         }
     }
 }

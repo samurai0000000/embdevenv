@@ -34,6 +34,7 @@ public:
     bool powerOff() override;
     bool reboot() override;
     bool resetUsbDownload(bool doubleReset = true) override;
+    PowerState getPowerState() const override;
     std::string sendCommand(const std::string &cmd, int timeoutMs = 2000) override;
 
     void pausePolling() override;
@@ -73,6 +74,9 @@ private:
 
     std::atomic<bool> _running;
     std::atomic<bool> _connected;
+    std::atomic<bool> _cmdInProgress{false};
+    std::atomic<bool> _streamingActive{false};
+    std::atomic<int> _consecutiveErrors{0};
     std::atomic<int> _activeClients;
     std::atomic<int> _pollPauseCount{0};
     std::thread _workerThread;

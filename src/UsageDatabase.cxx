@@ -33,6 +33,46 @@ UsageDatabase::~UsageDatabase()
     close();
 }
 
+static int queryPragmaInt(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *stmt = nullptr;
+    int val = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            val = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return val;
+}
+
+static bool columnExists(sqlite3 *db, const std::string &table, const std::string &col)
+{
+    std::string sql = "PRAGMA table_info(" + table + ");";
+    sqlite3_stmt *stmt = nullptr;
+    bool exists = false;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *name = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+            if (name && col == name) {
+                exists = true;
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    return exists;
+}
+
+int UsageDatabase::getPragmaInt(const std::string &pragmaSql) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_db) {
+        return -1;
+    }
+    return queryPragmaInt(_db, pragmaSql.c_str());
+}
+
 bool UsageDatabase::open(const std::string &dbPath)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -72,6 +112,17 @@ bool UsageDatabase::open(const std::string &dbPath)
     if (err) sqlite3_free(err);
     sqlite3_exec(_db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, &err);
     if (err) sqlite3_free(err);
+
+    int autoVacuum = queryPragmaInt(_db, "PRAGMA auto_vacuum;");
+    if (autoVacuum != 2) {
+        sqlite3_exec(_db, "PRAGMA auto_vacuum = INCREMENTAL;", nullptr, nullptr, nullptr);
+        sqlite3_exec(_db, "VACUUM;", nullptr, nullptr, nullptr);
+    } else {
+        int freelistCount = queryPragmaInt(_db, "PRAGMA freelist_count;");
+        if (freelistCount > 1000) {
+            sqlite3_exec(_db, "VACUUM;", nullptr, nullptr, nullptr);
+        }
+    }
 
     if (!initSchema()) {
         std::cerr << "[UsageDatabase] Failed to initialize schema" << std::endl;
@@ -131,7 +182,12 @@ bool UsageDatabase::initSchema()
         "  power_on INTEGER NOT NULL,"
         "  temp_c REAL NOT NULL,"
         "  fan_rpm INTEGER NOT NULL,"
-        "  voltages_json TEXT DEFAULT ''"
+        "  voltages_json TEXT DEFAULT '',"
+        "  max_temp_c REAL DEFAULT 0.0,"
+        "  min_voltage_sys5v REAL DEFAULT 0.0,"
+        "  min_voltage_vddecore REAL DEFAULT 0.0,"
+        "  min_voltage_vddcore REAL DEFAULT 0.0,"
+        "  fault_detected INTEGER DEFAULT 0"
         ");"
         "CREATE INDEX IF NOT EXISTS idx_board_telemetry_lookup "
         "ON board_telemetry_samples(board_name, timestamp);";
@@ -180,6 +236,23 @@ bool UsageDatabase::initSchema()
         std::cerr << "[UsageDatabase] DDL error (telemetry): " << (err ? err : "") << std::endl;
         if (err) sqlite3_free(err);
         return false;
+    }
+
+    // Check and apply column migrations for existing databases
+    if (!columnExists(_db, "board_telemetry_samples", "max_temp_c")) {
+        sqlite3_exec(_db, "ALTER TABLE board_telemetry_samples ADD COLUMN max_temp_c REAL DEFAULT 0.0;", nullptr, nullptr, nullptr);
+    }
+    if (!columnExists(_db, "board_telemetry_samples", "min_voltage_sys5v")) {
+        sqlite3_exec(_db, "ALTER TABLE board_telemetry_samples ADD COLUMN min_voltage_sys5v REAL DEFAULT 0.0;", nullptr, nullptr, nullptr);
+    }
+    if (!columnExists(_db, "board_telemetry_samples", "min_voltage_vddecore")) {
+        sqlite3_exec(_db, "ALTER TABLE board_telemetry_samples ADD COLUMN min_voltage_vddecore REAL DEFAULT 0.0;", nullptr, nullptr, nullptr);
+    }
+    if (!columnExists(_db, "board_telemetry_samples", "min_voltage_vddcore")) {
+        sqlite3_exec(_db, "ALTER TABLE board_telemetry_samples ADD COLUMN min_voltage_vddcore REAL DEFAULT 0.0;", nullptr, nullptr, nullptr);
+    }
+    if (!columnExists(_db, "board_telemetry_samples", "fault_detected")) {
+        sqlite3_exec(_db, "ALTER TABLE board_telemetry_samples ADD COLUMN fault_detected INTEGER DEFAULT 0;", nullptr, nullptr, nullptr);
     }
     if (sqlite3_exec(_db, ddlHourly, nullptr, nullptr, &err) != SQLITE_OK) {
         std::cerr << "[UsageDatabase] DDL error (hourly): " << (err ? err : "") << std::endl;
@@ -237,7 +310,10 @@ bool UsageDatabase::recordTelemetrySample(const std::string &boardName,
                                          bool powerOn,
                                          double tempC,
                                          int fanRpm,
-                                         const std::map<std::string, double> &voltages)
+                                         const std::map<std::string, double> &voltages,
+                                         double maxTempC,
+                                         const std::map<std::string, double> &minVoltages,
+                                         bool faultDetected)
 {
     if (boardName.empty()) {
         return false;
@@ -249,14 +325,29 @@ bool UsageDatabase::recordTelemetrySample(const std::string &boardName,
     nlohmann::json vJson = voltages;
     std::string vStr = vJson.dump();
 
+    double minSys5v = 0.0;
+    auto it5v = minVoltages.find("SYS_5V");
+    if (it5v != minVoltages.end()) minSys5v = it5v->second;
+
+    double minVddecore = 0.0;
+    auto itVdde = minVoltages.find("VDDECORE");
+    if (itVdde == minVoltages.end()) itVdde = minVoltages.find("VDD_ECORE");
+    if (itVdde != minVoltages.end()) minVddecore = itVdde->second;
+
+    double minVddcore = 0.0;
+    auto itVdd = minVoltages.find("VDDCORE");
+    if (itVdd == minVoltages.end()) itVdd = minVoltages.find("VDD_CORE");
+    if (itVdd != minVoltages.end()) minVddcore = itVdd->second;
+
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_db) {
         return false;
     }
 
     const char *sql =
-        "INSERT INTO board_telemetry_samples (timestamp, board_name, power_on, temp_c, fan_rpm, voltages_json) "
-        "VALUES (?, ?, ?, ?, ?, ?);";
+        "INSERT INTO board_telemetry_samples (timestamp, board_name, power_on, temp_c, fan_rpm, voltages_json, "
+        "max_temp_c, min_voltage_sys5v, min_voltage_vddecore, min_voltage_vddcore, fault_detected) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt *stmt = nullptr;
     if (sqlite3_prepare_v2(_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         return false;
@@ -268,6 +359,11 @@ bool UsageDatabase::recordTelemetrySample(const std::string &boardName,
     sqlite3_bind_double(stmt, 4, tempC);
     sqlite3_bind_int(stmt, 5, fanRpm);
     sqlite3_bind_text(stmt, 6, vStr.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 7, maxTempC > 0.0 ? maxTempC : tempC);
+    sqlite3_bind_double(stmt, 8, minSys5v);
+    sqlite3_bind_double(stmt, 9, minVddecore);
+    sqlite3_bind_double(stmt, 10, minVddcore);
+    sqlite3_bind_int(stmt, 11, faultDetected ? 1 : 0);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -382,7 +478,7 @@ nlohmann::json UsageDatabase::queryBoardStats(const std::string &boardName, int 
     int sampleCount = 0;
 
     const char *sqlTelem =
-        "SELECT AVG(temp_c), MAX(temp_c), MIN(temp_c), AVG(fan_rpm), COUNT(*) "
+        "SELECT AVG(temp_c), MAX(CASE WHEN max_temp_c > 0.0 THEN max_temp_c ELSE temp_c END), MIN(temp_c), AVG(fan_rpm), COUNT(*) "
         "FROM board_telemetry_samples "
         "WHERE board_name = ? AND timestamp >= ? AND temp_c > 0.0;";
     if (sqlite3_prepare_v2(_db, sqlTelem, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -467,6 +563,9 @@ void UsageDatabase::performRollupAndPrune(int rawRetentionDays, int rollupRetent
     // Prune old raw events
     std::string sqlPruneEvents = "DELETE FROM board_events WHERE timestamp < " + std::to_string(rawCutoff) + ";";
     sqlite3_exec(_db, sqlPruneEvents.c_str(), nullptr, nullptr, nullptr);
+
+    // Page-limited incremental vacuum to reclaim space without locking flash storage
+    sqlite3_exec(_db, "PRAGMA incremental_vacuum(500);", nullptr, nullptr, nullptr);
 }
 
 void UsageDatabase::maintenanceWorker()

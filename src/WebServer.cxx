@@ -9,8 +9,13 @@
 #include "FlashManager.hxx"
 #include "UsageDatabase.hxx"
 #include "TerminalSanitizer.hxx"
+#include "Config.hxx"
+#include "XyModem.hxx"
+#include <sys/stat.h>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+#include <filesystem>
+#include <algorithm>
 #include <cstdio>
 #include <sstream>
 #include <iomanip>
@@ -231,6 +236,9 @@ static std::string getMcpHintForPath(const std::string &path, const std::string 
     }
     if (path.find("/console/write") != std::string::npos) {
         return "Use official MCP tool 'embdevenv_console_write' or 'embdevenv_console_expect' with argument {\"target\": \"" + target + "\", \"command\": \"<command>\"}.";
+    }
+    if (path.find("/console/load") != std::string::npos) {
+        return "Use official MCP tool 'embdevenv_console_load' with argument {\"target\": \"" + target + "\", \"file_path\": \"<path>\"}.";
     }
     if (path.find("/console/clear") != std::string::npos) {
         return "Use official MCP tool 'embdevenv_console_clear' with argument {\"target\": \"" + target + "\"}.";
@@ -595,10 +603,252 @@ void WebServer::setupRoutes()
         res.set_content(R"({"success":true})", "application/json");
     });
 
+    // Console load firmware via YMODEM/XMODEM
+    _server->Post(R"(/api/targets/([^/]+)/console/load)", [](const httplib::Request &req, httplib::Response &res) {
+        std::string name = req.matches[1];
+        auto target = TargetManager::getInstance().getTarget(name);
+        if (!target) {
+            res.status = 404;
+            res.set_content(R"({"error":"Target not found"})", "application/json");
+            return;
+        }
+
+        try {
+            nlohmann::json body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
+            std::string filePath = body.value("file_path", "");
+            if (filePath.empty()) {
+                filePath = body.value("file", "");
+            }
+            std::string protocol = body.value("protocol", "ymodem");
+            std::string address = body.value("address", "0x20000000");
+            bool sendCommand = body.value("send_command", true);
+            int timeoutSec = body.value("timeout", 300);
+            if (body.contains("timeout_sec")) {
+                timeoutSec = body.value("timeout_sec", 300);
+            }
+            std::string consoleName = body.value("console", "");
+
+            std::shared_ptr<Console> console;
+            if (!consoleName.empty()) {
+                console = target->getConsoleByName(consoleName);
+            }
+            if (!console) {
+                console = target->getConsole();
+            }
+
+            if (!console) {
+                res.status = 404;
+                res.set_content(R"({"error":"Console not found for target"})", "application/json");
+                return;
+            }
+
+            if (filePath.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"'file_path' argument is required"})", "application/json");
+                return;
+            }
+
+            if (console->isTransferInProgress()) {
+                res.status = 409;
+                res.set_content(R"({"error":"Console is currently locked for active serial file transfer"})", "application/json");
+                return;
+            }
+
+            std::string resolvedPath = Config::resolveHomePath(filePath);
+            struct stat st;
+            if (stat(resolvedPath.c_str(), &st) != 0) {
+                res.status = 400;
+                nlohmann::json err = {{"error", "File not found: " + resolvedPath}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+
+            XyModem::Protocol proto = XyModem::Protocol::YMODEM;
+            std::string protoLower = protocol;
+            std::transform(protoLower.begin(), protoLower.end(), protoLower.begin(), ::tolower);
+            if (protoLower == "loadx" || protoLower == "xmodem") {
+                proto = XyModem::Protocol::XMODEM;
+            }
+
+            auto result = console->transferFile(resolvedPath, proto, sendCommand, address, timeoutSec);
+
+            UsageDatabase::getInstance().recordEvent(
+                name,
+                proto == XyModem::Protocol::YMODEM ? "console_loady" : "console_loadx",
+                result.success ? "success" : "failed",
+                static_cast<int64_t>(result.elapsedSec * 1000.0),
+                result.errorMessage.empty() ? (std::to_string(result.bytesSent) + " bytes") : result.errorMessage
+            );
+
+            nlohmann::json j = {
+                {"target", name},
+                {"console", console->getName()},
+                {"success", result.success},
+                {"protocol", result.protocol},
+                {"fileSize", result.fileSize},
+                {"bytesSent", result.bytesSent},
+                {"packetsSent", result.packetsSent},
+                {"retries", result.retries},
+                {"elapsedSec", result.elapsedSec},
+                {"transferRateKBps", result.transferRateKBps},
+                {"capturedOutput", result.capturedOutput}
+            };
+            if (!result.success && !result.errorMessage.empty()) {
+                j["errorMessage"] = result.errorMessage;
+            }
+            res.status = result.success ? 200 : 500;
+            res.set_content(j.dump(2), "application/json");
+        } catch (const std::exception &ex) {
+            res.status = 400;
+            nlohmann::json err = {{"error", ex.what()}};
+            res.set_content(err.dump(), "application/json");
+        }
+    });
+
     // List host USB devices via usb-matrix -l
     _server->Get("/api/usb/devices", [](const httplib::Request &, httplib::Response &res) {
         auto j = FlashManager::getInstance().listUsbDevices();
         res.set_content(j.dump(2), "application/json");
+    });
+
+    // Browse host filesystem for firmware / binary selection
+    _server->Get("/api/fs/browse", [](const httplib::Request &req, httplib::Response &res) {
+        namespace fs = std::filesystem;
+        try {
+            std::string reqPath = req.get_param_value("path");
+            std::string extFilter = req.get_param_value("ext");
+
+            // Expand tilde if present
+            if (!reqPath.empty() && reqPath[0] == '~') {
+                const char *home = getenv("HOME");
+                if (home) {
+                    reqPath = std::string(home) + reqPath.substr(1);
+                }
+            }
+
+            fs::path targetPath;
+            if (reqPath.empty()) {
+                const char *home = getenv("HOME");
+                if (home && fs::exists(fs::path(home) / "work")) {
+                    targetPath = fs::path(home) / "work";
+                } else if (home && fs::exists(home)) {
+                    targetPath = fs::path(home);
+                } else {
+                    targetPath = fs::current_path();
+                }
+            } else {
+                targetPath = fs::path(reqPath);
+            }
+
+            std::error_code ec;
+            targetPath = fs::weakly_canonical(targetPath, ec);
+            if (ec || !fs::exists(targetPath, ec)) {
+                if (targetPath.has_parent_path() && fs::exists(targetPath.parent_path(), ec)) {
+                    targetPath = targetPath.parent_path();
+                } else {
+                    const char *home = getenv("HOME");
+                    targetPath = home ? fs::path(home) : fs::current_path();
+                }
+            } else if (!fs::is_directory(targetPath, ec)) {
+                targetPath = targetPath.parent_path();
+            }
+
+            // Parse extension filters (e.g. ".bin,.pkg,.img" or "bin,pkg,img")
+            std::vector<std::string> exts;
+            if (!extFilter.empty()) {
+                std::stringstream ss(extFilter);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    token.erase(0, token.find_first_not_of(" \t"));
+                    token.erase(token.find_last_not_of(" \t") + 1);
+                    if (!token.empty()) {
+                        if (token[0] != '.') token = "." + token;
+                        std::transform(token.begin(), token.end(), token.begin(), ::tolower);
+                        exts.push_back(token);
+                    }
+                }
+            }
+
+            nlohmann::json entries = nlohmann::json::array();
+            fs::directory_iterator dirIt(targetPath, fs::directory_options::skip_permission_denied, ec);
+            if (!ec) {
+                struct EntryInfo {
+                    std::string name;
+                    std::string path;
+                    bool isDir;
+                    int64_t size;
+                    int64_t mtime;
+                };
+                std::vector<EntryInfo> list;
+
+                for (const auto &entry : dirIt) {
+                    std::error_code entryEc;
+                    auto status = entry.status(entryEc);
+                    if (entryEc) continue;
+
+                    bool isDir = fs::is_directory(status);
+                    std::string filename = entry.path().filename().string();
+                    if (filename.empty() || filename[0] == '.') {
+                        continue; // Skip hidden files/directories
+                    }
+
+                    if (!isDir && !exts.empty()) {
+                        std::string entryExt = entry.path().extension().string();
+                        std::transform(entryExt.begin(), entryExt.end(), entryExt.begin(), ::tolower);
+                        bool match = false;
+                        for (const auto &e : exts) {
+                            if (entryExt == e) { match = true; break; }
+                        }
+                        if (!match) continue;
+                    }
+
+                    int64_t sz = 0;
+                    if (!isDir) {
+                        sz = static_cast<int64_t>(entry.file_size(entryEc));
+                        if (entryEc) sz = 0;
+                    }
+
+                    int64_t mtimeSec = 0;
+                    struct stat st;
+                    if (stat(entry.path().c_str(), &st) == 0) {
+                        mtimeSec = st.st_mtime;
+                    }
+
+                    list.push_back({filename, entry.path().string(), isDir, sz, mtimeSec});
+                }
+
+                // Sort: directories first (alphabetical), then files (alphabetical)
+                std::sort(list.begin(), list.end(), [](const EntryInfo &a, const EntryInfo &b) {
+                    if (a.isDir != b.isDir) return a.isDir > b.isDir;
+                    return a.name < b.name;
+                });
+
+                for (const auto &item : list) {
+                    entries.push_back({
+                        {"name", item.name},
+                        {"path", item.path},
+                        {"is_dir", item.isDir},
+                        {"size", item.size},
+                        {"mtime", item.mtime}
+                    });
+                }
+            }
+
+            std::string parentStr = "";
+            if (targetPath.has_parent_path() && targetPath != targetPath.parent_path()) {
+                parentStr = targetPath.parent_path().string();
+            }
+
+            nlohmann::json resp;
+            resp["current"] = targetPath.string();
+            resp["parent"] = parentStr;
+            resp["entries"] = entries;
+            res.set_content(resp.dump(2), "application/json");
+        } catch (const std::exception &ex) {
+            res.status = 500;
+            nlohmann::json err = {{"error", ex.what()}};
+            res.set_content(err.dump(), "application/json");
+        }
     });
 
     // Flash target firmware
@@ -664,10 +914,16 @@ void WebServer::setupRoutes()
             return;
         }
 
-        // Hydrate initial terminal state with recent buffer history
-        auto recent = console->getRecentLines(100);
-        for (const auto &line : recent) {
+        // Hydrate initial terminal state with recent buffer history:
+        // Stream completed lines with trailing \r\n, and stream the active
+        // partial prompt line WITHOUT \r\n to preserve inline cursor positioning.
+        auto completed = console->getCompletedLines(100);
+        for (const auto &line : completed) {
             ws.send(line + "\r\n");
+        }
+        std::string partial = console->getPartialLine();
+        if (!partial.empty()) {
+            ws.send(partial);
         }
 
         // Stream live serial UART output directly to WebSocket
@@ -1223,8 +1479,10 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
         .btn-reboot:hover { filter: brightness(1.15); }
         .btn-usb-boot { background: var(--accent-indigo); color: #ffffff; }
         .btn-usb-boot:hover { filter: brightness(1.15); }
-        .btn-flash { background: linear-gradient(135deg, #06b6d4, #6366f1); color: #ffffff; grid-column: span 2; }
+        .btn-flash { background: linear-gradient(135deg, #06b6d4, #6366f1); color: #ffffff; }
         .btn-flash:hover { filter: brightness(1.15); box-shadow: 0 0 12px rgba(6, 182, 212, 0.4); }
+        .btn-ymodem { background: linear-gradient(135deg, #0d9488, #10b981); color: #ffffff; }
+        .btn-ymodem:hover { filter: brightness(1.15); box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); }
         .flash-form-group { display: flex; flex-direction: column; gap: 0.35rem; }
         .flash-form-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
         .flash-form-input {
@@ -1396,11 +1654,13 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
             padding: 0.35rem 0.5rem;
             background: var(--bg-term);
             outline: none;
-            overflow: hidden;
+            overflow-y: auto;
             position: relative;
             border: 2px solid transparent;
             font-family: 'Lucida Console', 'Courier New', Monaco, monospace;
             transition: border-color 0.2s, box-shadow 0.2s;
+            white-space: pre-wrap;
+            word-break: break-all;
         }
         .terminal-screen:focus, .terminal-screen:focus-within {
             border-color: rgba(6,182,212,0.6);
@@ -1566,8 +1826,9 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                         <button class="btn btn-power-on" onclick="controlPower('on')">&#x25B6; Power ON</button>
                         <button class="btn btn-power-off" onclick="requestPowerOff()">&#x25A0; Power OFF</button>
                         <button class="btn btn-reboot" onclick="requestReboot()">&#x21BB; Reboot</button>
-                        <button class="btn btn-usb-boot" onclick="requestUsbBoot()">&#x1F50C; USB Boot</button>
+                        <button id="btnUsbBoot" class="btn btn-usb-boot" onclick="requestUsbBoot()">&#x1F50C; USB Boot</button>
                         <button class="btn btn-flash" onclick="openFlashModal()">&#x26A1; Flash Firmware</button>
+                        <button class="btn btn-ymodem" onclick="openYmodemModal()">&#x1F4E5; YMODEM Load</button>
                     </div>
                     <div>
                         <div class="meta-row">
@@ -1820,17 +2081,26 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
 
                 <div class="flash-form-group">
                     <label class="flash-form-label">Firmware Package (*.bin / *.pkg)</label>
-                    <input id="flashFwInput" class="flash-form-input" type="text" placeholder="/path/to/firmware.bin">
+                    <div style="display:flex; gap:0.5rem;">
+                        <input id="flashFwInput" class="flash-form-input" style="flex:1;" type="text" placeholder="/path/to/firmware.bin">
+                        <button type="button" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem; white-space:nowrap;" onclick="openFileChooser('flashFwInput', '.bin,.pkg')">&#x1F4C1; Browse</button>
+                    </div>
                 </div>
 
                 <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem;">
                     <div class="flash-form-group">
                         <label class="flash-form-label">UST Image (Optional)</label>
-                        <input id="flashUstInput" class="flash-form-input" type="text" placeholder="/path/to/ust.bin">
+                        <div style="display:flex; gap:0.4rem;">
+                            <input id="flashUstInput" class="flash-form-input" style="flex:1; min-width:0;" type="text" placeholder="/path/to/ust.bin">
+                            <button type="button" class="btn btn-secondary" style="padding:0.3rem 0.5rem; font-size:0.75rem; white-space:nowrap;" onclick="openFileChooser('flashUstInput', '.bin')" title="Browse server for UST image">&#x1F4C1;</button>
+                        </div>
                     </div>
                     <div class="flash-form-group">
                         <label class="flash-form-label">BLD Image (Optional)</label>
-                        <input id="flashBldInput" class="flash-form-input" type="text" placeholder="/path/to/bld.bin">
+                        <div style="display:flex; gap:0.4rem;">
+                            <input id="flashBldInput" class="flash-form-input" style="flex:1; min-width:0;" type="text" placeholder="/path/to/bld.bin">
+                            <button type="button" class="btn btn-secondary" style="padding:0.3rem 0.5rem; font-size:0.75rem; white-space:nowrap;" onclick="openFileChooser('flashBldInput', '.bin')" title="Browse server for BLD image">&#x1F4C1;</button>
+                        </div>
                     </div>
                 </div>
 
@@ -1857,9 +2127,116 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
         </div>
     </div>
 
+    <!-- YMODEM Download Modal -->
+    <div id="ymodemModal" class="modal-backdrop" style="display:none;">
+        <div class="modal-card" style="max-width:560px;">
+            <div class="modal-title" style="color:var(--accent-emerald);">
+                <span>&#x1F4E5;</span> YMODEM / XMODEM Load: <span id="ymodemTargetName" style="color:var(--text-main);">-</span>
+            </div>
+            <div class="modal-desc" style="display:flex; flex-direction:column; gap:0.8rem;">
+                <div class="flash-form-group">
+                    <label class="flash-form-label">Firmware / Binary File Path</label>
+                    <div style="display:flex; gap:0.5rem;">
+                        <input id="ymodemFileInput" class="flash-form-input" style="flex:1;" type="text" placeholder="/path/to/firmware.bin">
+                        <button type="button" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem; white-space:nowrap;" onclick="openFileChooser('ymodemFileInput', '.bin,.pkg,.img')">&#x1F4C1; Browse</button>
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem;">
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">Protocol</label>
+                        <select id="ymodemProtoSelect" class="flash-form-input" style="height:34px; cursor:pointer;">
+                            <option value="ymodem" selected>YMODEM (loady)</option>
+                            <option value="xmodem">XMODEM (loadx)</option>
+                        </select>
+                    </div>
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">DRAM Load Address</label>
+                        <input id="ymodemAddressInput" class="flash-form-input" type="text" value="0x20000000" placeholder="0x20000000">
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem;">
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">U-Boot Auto-Command</label>
+                        <label style="display:flex; align-items:center; gap:0.5rem; height:34px; cursor:pointer; font-size:0.85rem; color:var(--text-main);">
+                            <input id="ymodemSendCommand" type="checkbox" checked>
+                            <span>Send loady / loadx</span>
+                        </label>
+                    </div>
+                    <div class="flash-form-group">
+                        <label class="flash-form-label">Timeout (seconds)</label>
+                        <input id="ymodemTimeoutInput" class="flash-form-input" type="number" value="300" min="10" max="3600">
+                    </div>
+                </div>
+
+                <div id="ymodemStatusArea" style="display:none; flex-direction:column; gap:0.4rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem;">
+                        <span id="ymodemStatusMsg" style="font-weight:600; color:var(--accent-cyan);">Transfer in progress...</span>
+                        <span id="ymodemTimer" style="color:var(--text-muted); font-size:0.75rem;"></span>
+                    </div>
+                    <pre id="ymodemLogArea" class="flash-log-box"></pre>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button id="ymodemCancelBtn" class="btn btn-secondary" onclick="closeYmodemModal()">Cancel</button>
+                <button id="ymodemSubmitBtn" class="btn btn-ymodem" style="grid-column:unset;" onclick="executeYmodemTransfer()">&#x1F4E5; Load Now</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Server File Chooser Modal -->
+    <div id="fileChooserModal" class="modal-backdrop" style="display:none; z-index:1100;">
+        <div class="modal-card" style="max-width:680px; width:90%; max-height:85vh; display:flex; flex-direction:column;">
+            <div class="modal-title" style="color:var(--accent-cyan); display:flex; justify-content:space-between; align-items:center;">
+                <span>&#x1F4C1; Select File on Server</span>
+                <span id="fcExtBadge" class="status-pill" style="font-size:0.7rem; color:var(--text-muted);">*.*</span>
+            </div>
+            
+            <!-- Quick Bookmarks -->
+            <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <span style="font-size:0.75rem; color:var(--text-muted); align-self:center;">Shortcuts:</span>
+                <button type="button" class="btn btn-secondary" style="padding:0.15rem 0.45rem; font-size:0.75rem;" onclick="loadDir('~/work/amba-virt/boot/bootstrap/n1-655')">amba-virt bootstrap</button>
+                <button type="button" class="btn btn-secondary" style="padding:0.15rem 0.45rem; font-size:0.75rem;" onclick="loadDir('~/work')">~/work</button>
+                <button type="button" class="btn btn-secondary" style="padding:0.15rem 0.45rem; font-size:0.75rem;" onclick="loadDir('~')">Home</button>
+                <button type="button" class="btn btn-secondary" style="padding:0.15rem 0.45rem; font-size:0.75rem;" onclick="loadDir('/tmp')">/tmp</button>
+            </div>
+
+            <!-- Path Bar & Up Button -->
+            <div style="display:flex; gap:0.4rem; align-items:center; margin-bottom:0.5rem;">
+                <button type="button" id="fcUpBtn" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;" onclick="navigateUpDir()" title="Go up one level">&#x2B06; Up</button>
+                <input id="fcPathInput" class="flash-form-input" style="flex:1; font-family:monospace; font-size:0.8rem;" type="text" onkeydown="if(event.key==='Enter') loadDir(this.value)">
+                <button type="button" class="btn btn-secondary" style="padding:0.3rem 0.6rem; font-size:0.8rem;" onclick="loadDir(document.getElementById('fcPathInput').value)">Go</button>
+            </div>
+
+            <!-- Filter bar -->
+            <div style="margin-bottom:0.5rem;">
+                <input id="fcFilterInput" class="flash-form-input" style="width:100%; font-size:0.8rem;" type="text" placeholder="Filter files in directory..." oninput="filterFileList(this.value)">
+            </div>
+
+            <!-- File List Container -->
+            <div id="fcListContainer" style="flex:1; overflow-y:auto; min-height:220px; max-height:360px; background:#050811; border:1px solid var(--border); border-radius:6px; padding:0.25rem;">
+                <div id="fcEntries" style="display:flex; flex-direction:column; gap:2px;"></div>
+            </div>
+
+            <!-- Selected File Display -->
+            <div style="margin-top:0.6rem; font-size:0.8rem; color:var(--text-muted); display:flex; gap:0.4rem; align-items:center;">
+                <span style="font-weight:600;">Selected:</span>
+                <span id="fcSelectedPath" style="color:var(--text-main); font-family:monospace; word-break:break-all;">(none)</span>
+            </div>
+
+            <!-- Modal Actions -->
+            <div class="modal-actions" style="margin-top:0.8rem;">
+                <button type="button" class="btn btn-secondary" onclick="closeFileChooser()">Cancel</button>
+                <button type="button" id="fcSelectBtn" class="btn btn-flash" style="grid-column:unset;" onclick="confirmFileChooserSelection()" disabled>Choose This File</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let targets = [];
         let activeTarget = '';
+        let activeTargetData = null;
         let activeConsole = '';
         let ws = null;
         let wsReconnectTimer = null;
@@ -1900,12 +2277,28 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
         }
 
         function requestUsbBoot() {
+            const mcu = (activeTargetData && activeTargetData.mcu) || null;
+            const ps = (mcu && mcu.powerState) ? mcu.powerState : 'unknown';
+
+            if (ps === 'unknown') {
+                alert('Power state unknown — waiting for MCU telemetry. Cannot determine whether to power on or reset.');
+                return;
+            }
+
             pendingPowerAction = 'usb_download';
-            document.getElementById('modalTitle').innerHTML = '&#x1F50C; Enter USB Download Mode';
-            document.getElementById('modalDesc').textContent = `Are you sure you want to put target "${activeTarget}" into USB download mode for flashing? The SoC will reboot into USB bootloader mode.`;
             const btn = document.getElementById('modalConfirmBtn');
             btn.className = 'btn btn-usb-boot';
-            btn.textContent = 'Enter USB Boot';
+
+            if (ps === 'off') {
+                document.getElementById('modalTitle').innerHTML = '&#x1F50C; Power On to USB Boot';
+                document.getElementById('modalDesc').textContent = `Target "${activeTarget}" is currently powered off. Will power on directly into USB bootloader mode (pwr on -usb).`;
+                btn.textContent = 'Power On to USB Boot';
+            } else {
+                document.getElementById('modalTitle').innerHTML = '&#x1F50C; Reboot to USB Boot';
+                document.getElementById('modalDesc').textContent = `Target "${activeTarget}" is currently powered on. The SoC will be rebooted into USB download mode (reset -usb -y).`;
+                btn.textContent = 'Reboot to USB Boot';
+            }
+
             document.getElementById('safetyModal').style.display = 'flex';
         }
 
@@ -2066,6 +2459,244 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
             const action = pendingPowerAction;
             closeSafetyModal();
             await controlPower(action);
+        }
+
+        let isYmodemOperation = false;
+
+        function openYmodemModal() {
+            if (!activeTarget) return;
+            document.getElementById('ymodemTargetName').textContent = activeTarget;
+            document.getElementById('ymodemStatusArea').style.display = 'none';
+            document.getElementById('ymodemLogArea').textContent = '';
+            document.getElementById('ymodemSubmitBtn').disabled = false;
+            document.getElementById('ymodemCancelBtn').disabled = false;
+            document.getElementById('ymodemModal').style.display = 'flex';
+        }
+
+        function closeYmodemModal() {
+            if (isYmodemOperation) {
+                if (!confirm("Transfer is currently in progress. Close modal anyway?")) return;
+            }
+            document.getElementById('ymodemModal').style.display = 'none';
+        }
+
+        async function executeYmodemTransfer() {
+            if (!activeTarget || isYmodemOperation) return;
+
+            const filePath = document.getElementById('ymodemFileInput').value.trim();
+            const protocol = document.getElementById('ymodemProtoSelect').value;
+            const address = document.getElementById('ymodemAddressInput').value.trim() || '0x20000000';
+            const sendCommand = document.getElementById('ymodemSendCommand').checked;
+            const timeout = parseInt(document.getElementById('ymodemTimeoutInput').value, 10) || 300;
+
+            if (!filePath) {
+                alert('Please specify the binary file path to transfer.');
+                return;
+            }
+
+            isYmodemOperation = true;
+            const submitBtn = document.getElementById('ymodemSubmitBtn');
+            const cancelBtn = document.getElementById('ymodemCancelBtn');
+            const statusArea = document.getElementById('ymodemStatusArea');
+            const statusMsg = document.getElementById('ymodemStatusMsg');
+            const logArea = document.getElementById('ymodemLogArea');
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Transferring...';
+            cancelBtn.disabled = true;
+            statusArea.style.display = 'flex';
+            statusMsg.textContent = `Starting ${protocol.toUpperCase()} transfer...`;
+            statusMsg.style.color = 'var(--accent-cyan)';
+            logArea.textContent = `Initiating ${protocol.toUpperCase()} transfer for ${filePath} to ${activeTarget} (address: ${address})...\n`;
+
+            const startTime = Date.now();
+            const timerEl = document.getElementById('ymodemTimer');
+            const timerInterval = setInterval(() => {
+                const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+                timerEl.textContent = `${elapsedSec}s`;
+            }, 200);
+
+            try {
+                const res = await fetch(`/api/targets/${activeTarget}/console/load`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        file_path: filePath,
+                        protocol: protocol,
+                        address: address,
+                        send_command: sendCommand,
+                        timeout: timeout,
+                        console: activeConsole || undefined
+                    })
+                });
+
+                clearInterval(timerInterval);
+                const data = await res.json();
+
+                if (res.ok && data.success) {
+                    statusMsg.textContent = `✓ Transfer Succeeded! (${data.bytesSent} bytes in ${data.elapsedSec.toFixed(1)}s at ${data.transferRateKBps.toFixed(1)} KB/s)`;
+                    statusMsg.style.color = 'var(--accent-emerald)';
+                    logArea.textContent += `[SUCCESS] Protocol: ${data.protocol}\nBytes: ${data.bytesSent} / ${data.fileSize}\nPackets: ${data.packetsSent}, Retries: ${data.retries}\nRate: ${data.transferRateKBps.toFixed(2)} KB/s\n`;
+                    if (data.capturedOutput) {
+                        logArea.textContent += `\n--- Output ---\n${data.capturedOutput}\n`;
+                    }
+                } else {
+                    const err = data.errorMessage || data.error || ('HTTP ' + res.status);
+                    statusMsg.textContent = `✗ Transfer Failed: ${err}`;
+                    statusMsg.style.color = 'var(--accent-rose)';
+                    logArea.textContent += `\n[ERROR] ${err}\n`;
+                    if (data.capturedOutput) {
+                        logArea.textContent += `\n--- Output ---\n${data.capturedOutput}\n`;
+                    }
+                }
+            } catch (err) {
+                clearInterval(timerInterval);
+                statusMsg.textContent = `✗ Transfer Error: ${err.message}`;
+                statusMsg.style.color = 'var(--accent-rose)';
+                logArea.textContent += `\n[NETWORK ERROR] ${err.message}\n`;
+            } finally {
+                isYmodemOperation = false;
+                submitBtn.disabled = false;
+                submitBtn.textContent = '📥 Load Now';
+                cancelBtn.disabled = false;
+            }
+        }
+
+        // Server File Chooser Logic
+        let fcTargetInputId = '';
+        let fcCurrentExt = '';
+        let fcCurrentDir = '';
+        let fcParentDir = '';
+        let fcRawEntries = [];
+        let fcSelectedFile = '';
+
+        function openFileChooser(targetInputId, extFilter) {
+            fcTargetInputId = targetInputId;
+            fcCurrentExt = extFilter || '';
+            fcSelectedFile = '';
+            document.getElementById('fcExtBadge').textContent = extFilter ? extFilter : '*.*';
+            document.getElementById('fcSelectedPath').textContent = '(none)';
+            document.getElementById('fcSelectBtn').disabled = true;
+            document.getElementById('fcFilterInput').value = '';
+
+            let initialPath = '';
+            const targetEl = document.getElementById(targetInputId);
+            if (targetEl && targetEl.value.trim()) {
+                initialPath = targetEl.value.trim();
+            }
+            loadDir(initialPath);
+            document.getElementById('fileChooserModal').style.display = 'flex';
+        }
+
+        function closeFileChooser() {
+            document.getElementById('fileChooserModal').style.display = 'none';
+        }
+
+        async function loadDir(path) {
+            try {
+                let url = '/api/fs/browse?';
+                if (path) url += 'path=' + encodeURIComponent(path) + '&';
+                if (fcCurrentExt) url += 'ext=' + encodeURIComponent(fcCurrentExt);
+                
+                const res = await fetch(url);
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.error || 'Failed to read directory');
+                    return;
+                }
+                const data = await res.json();
+                fcCurrentDir = data.current;
+                fcParentDir = data.parent || '';
+                fcRawEntries = data.entries || [];
+                
+                document.getElementById('fcPathInput').value = fcCurrentDir;
+                document.getElementById('fcUpBtn').disabled = !fcParentDir;
+                renderFileList(fcRawEntries);
+            } catch (e) {
+                console.error('File chooser error:', e);
+            }
+        }
+
+        function navigateUpDir() {
+            if (fcParentDir) {
+                loadDir(fcParentDir);
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function renderFileList(entries) {
+            const container = document.getElementById('fcEntries');
+            container.innerHTML = '';
+            if (!entries || entries.length === 0) {
+                container.innerHTML = '<div style="padding:1rem; text-align:center; color:var(--text-muted); font-size:0.8rem;">No matching files or directories found.</div>';
+                return;
+            }
+            entries.forEach(entry => {
+                const item = document.createElement('div');
+                item.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:0.35rem 0.6rem; border-radius:4px; cursor:pointer; font-size:0.82rem; user-select:none; transition:background 0.15s;';
+                item.className = 'fc-item';
+                
+                const icon = entry.is_dir ? '&#x1F4C1;' : '&#x1F4C4;';
+                const sizeStr = entry.is_dir ? '&lt;DIR&gt;' : formatBytes(entry.size);
+                
+                item.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:0.5rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        <span style="font-size:1rem;">${icon}</span>
+                        <span style="color:${entry.is_dir ? 'var(--accent-cyan)' : 'var(--text-main)'}; font-weight:${entry.is_dir ? '600' : 'normal'}; font-family:monospace;">${escapeHtml(entry.name)}</span>
+                    </div>
+                    <span style="color:var(--text-muted); font-size:0.75rem; font-family:monospace; margin-left:1rem; flex-shrink:0;">${sizeStr}</span>
+                `;
+
+                item.addEventListener('mouseenter', () => item.style.background = 'rgba(6,182,212,0.12)');
+                item.addEventListener('mouseleave', () => {
+                    if (fcSelectedFile !== entry.path) item.style.background = 'transparent';
+                    else item.style.background = 'rgba(6,182,212,0.25)';
+                });
+
+                item.addEventListener('click', () => {
+                    if (entry.is_dir) {
+                        loadDir(entry.path);
+                    } else {
+                        document.querySelectorAll('.fc-item').forEach(el => el.style.background = 'transparent');
+                        item.style.background = 'rgba(6,182,212,0.25)';
+                        fcSelectedFile = entry.path;
+                        document.getElementById('fcSelectedPath').textContent = entry.path;
+                        document.getElementById('fcSelectBtn').disabled = false;
+                    }
+                });
+
+                if (!entry.is_dir) {
+                    item.addEventListener('dblclick', () => {
+                        fcSelectedFile = entry.path;
+                        confirmFileChooserSelection();
+                    });
+                }
+
+                container.appendChild(item);
+            });
+        }
+
+        function filterFileList(q) {
+            const query = q.toLowerCase();
+            const filtered = fcRawEntries.filter(e => e.name.toLowerCase().includes(query));
+            renderFileList(filtered);
+        }
+
+        function confirmFileChooserSelection() {
+            if (fcSelectedFile && fcTargetInputId) {
+                const targetEl = document.getElementById(fcTargetInputId);
+                if (targetEl) {
+                    targetEl.value = fcSelectedFile;
+                }
+                closeFileChooser();
+            }
         }
 
         // Fullscreen Terminal Toggle
@@ -2640,7 +3271,10 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
             let found = false;
             consoles.forEach(c => {
                 if (c.name === currentVal) found = true;
-                optionsHtml += `<option value="${c.name}">${c.name} (${c.port} : ${c.telnetPort})</option>`;
+                const isConn = (c.connected !== false);
+                const discLabel = isConn ? '' : ' [disconnected]';
+                const styleAttr = isConn ? '' : ' style="color: var(--accent-rose);"';
+                optionsHtml += `<option value="${c.name}"${styleAttr}>${c.name} (${c.port} : ${c.telnetPort})${discLabel}</option>`;
             });
             select.innerHTML = optionsHtml;
             if (found) {
@@ -2706,6 +3340,7 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                 const res = await fetch(`/api/targets/${activeTarget}`);
                 if (!res.ok) return;
                 const data = await res.json();
+                activeTargetData = data;
 
                 document.getElementById('targetModel').textContent = data.model || '-';
                 if (data.consoles && data.consoles.length > 0) {
@@ -2719,20 +3354,49 @@ std::string WebServer::getDashboardHtml(const std::string &sessionToken) const
                     updateConsolesDropdown([]);
                 }
 
-                document.getElementById('targetMcu').textContent = (data.mcu ? `${data.mcu.port} (telnet ${data.mcu.telnetPort})` : '-');
+                const mcuElem = document.getElementById('targetMcu');
+                if (data.mcu) {
+                    const isConn = data.mcu.connected;
+                    const dotColor = isConn ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+                    const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor};margin-right:6px;vertical-align:middle;"></span>`;
+                    const label = isConn ? '' : ' <span style="color:var(--accent-rose);font-size:11px;">(disconnected)</span>';
+                    mcuElem.innerHTML = `${dot}${data.mcu.port} (telnet ${data.mcu.telnetPort})${label}`;
+                } else {
+                    mcuElem.textContent = '-';
+                }
 
                 const powerBadge = document.getElementById('powerBadge');
-                const isPowerOn = data.mcu && data.mcu.powerOn;
-                if (isPowerOn) {
+                const ps = (data.mcu && data.mcu.powerState) ? data.mcu.powerState : (data.mcu && data.mcu.powerOn ? 'on' : (data.mcu ? 'off' : 'unknown'));
+                if (ps === 'on') {
                     powerBadge.textContent = 'POWER ON';
                     powerBadge.style.background = 'rgba(16,185,129,0.15)';
                     powerBadge.style.color = 'var(--accent-emerald)';
                     powerBadge.style.borderColor = 'rgba(16,185,129,0.3)';
-                } else {
+                } else if (ps === 'off') {
                     powerBadge.textContent = 'POWER OFF';
                     powerBadge.style.background = 'rgba(244,63,94,0.15)';
                     powerBadge.style.color = 'var(--accent-rose)';
                     powerBadge.style.borderColor = 'rgba(244,63,94,0.3)';
+                } else {
+                    powerBadge.textContent = 'POWER UNKNOWN';
+                    powerBadge.style.background = 'rgba(245,158,11,0.15)';
+                    powerBadge.style.color = '#f59e0b';
+                    powerBadge.style.borderColor = 'rgba(245,158,11,0.3)';
+                }
+
+                const usbBootBtn = document.getElementById('btnUsbBoot');
+                if (usbBootBtn) {
+                    if (ps === 'unknown') {
+                        usbBootBtn.disabled = true;
+                        usbBootBtn.title = 'Power state unknown — waiting for MCU telemetry...';
+                        usbBootBtn.style.opacity = '0.5';
+                        usbBootBtn.style.cursor = 'not-allowed';
+                    } else {
+                        usbBootBtn.disabled = false;
+                        usbBootBtn.title = (ps === 'off') ? 'Power on into USB bootloader mode' : 'Reboot into USB download mode';
+                        usbBootBtn.style.opacity = '1.0';
+                        usbBootBtn.style.cursor = 'pointer';
+                    }
                 }
 
                 if (data.mcu && data.mcu.latestSample) {

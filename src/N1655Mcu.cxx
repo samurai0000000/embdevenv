@@ -38,6 +38,7 @@ N1655Mcu::~N1655Mcu()
 void N1655Mcu::pausePolling()
 {
     _pollPauseCount.fetch_add(1);
+    _cv.notify_all();
 }
 
 void N1655Mcu::resumePolling()
@@ -171,6 +172,12 @@ void N1655Mcu::onClientConnect()
 {
     _activeClients.fetch_add(1);
     _cv.notify_all();
+
+    std::lock_guard<std::mutex> lock(_cmdMutex);
+    _streamingActive = false;
+    if (_serial.isOpen()) {
+        recoverPrompt(500);
+    }
 }
 
 void N1655Mcu::onClientDisconnect()
@@ -179,6 +186,16 @@ void N1655Mcu::onClientDisconnect()
     while (cur > 0 && !_activeClients.compare_exchange_weak(cur, cur - 1)) {
     }
     _cv.notify_all();
+
+    if (_activeClients.load() == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::lock_guard<std::mutex> lock(_cmdMutex);
+        if (_serial.isOpen() && !_cmdInProgress.load() && !isPollingPaused()) {
+            ssize_t wb = _serial.write("bs\r");
+            (void)wb;
+            _streamingActive = true;
+        }
+    }
 }
 
 void N1655Mcu::broadcastOutput(const char *data, size_t len)
@@ -233,7 +250,15 @@ bool N1655Mcu::recoverPrompt(int timeoutMs)
 
 std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
 {
+    _cmdInProgress = true;
+    _cv.notify_all();
+
     std::lock_guard<std::mutex> lock(_cmdMutex);
+
+    struct CmdGuard {
+        std::atomic<bool> &flag;
+        ~CmdGuard() { flag.store(false); }
+    } guard{_cmdInProgress};
 
     if (!_serial.isOpen()) {
         if (!_serial.open(_port, _baudRate)) {
@@ -286,6 +311,13 @@ std::string N1655Mcu::sendCommand(const std::string &cmd, int timeoutMs)
         response.pop_back();
     }
 
+    // Re-issue bs\r if not in interactive Telnet session and polling not paused
+    if (_serial.isOpen() && _activeClients.load() == 0 && !isPollingPaused()) {
+        ssize_t wb = _serial.write("bs\r");
+        (void)wb;
+        _streamingActive = true;
+    }
+
     return response;
 }
 
@@ -319,8 +351,37 @@ bool N1655Mcu::reboot()
     return ok;
 }
 
+Mcu::PowerState N1655Mcu::getPowerState() const
+{
+    TelemetrySample sample;
+    if (_telemetryStore && _telemetryStore->getLatest(sample)) {
+        return sample.powerOn ? PowerState::ON : PowerState::OFF;
+    }
+    return PowerState::UNKNOWN;
+}
+
 bool N1655Mcu::resetUsbDownload(bool doubleReset)
 {
+    PowerState ps = getPowerState();
+    if (ps == PowerState::UNKNOWN) {
+        fprintf(stderr, "[embdevenv] N1655Mcu: cannot perform USB boot; target power state is unknown (no telemetry)\n");
+        if (!_targetName.empty()) {
+            UsageDatabase::getInstance().recordEvent(_targetName, "usb_download", "failed_unknown_power");
+        }
+        return false;
+    }
+
+    if (ps == PowerState::OFF) {
+        // Target is powered off: power on directly into USB bootloader mode
+        std::string resp = sendCommand("pwr on -usb", 3000);
+        bool ok = !resp.empty();
+        if (!_targetName.empty()) {
+            UsageDatabase::getInstance().recordEvent(_targetName, "usb_download", ok ? "success" : "failed");
+        }
+        return ok;
+    }
+
+    // PowerState::ON: reboot into USB download mode
     std::string resp = sendCommand("reset -usb -y", 3000);
     if (resp.empty()) {
         if (!_targetName.empty()) {
@@ -406,6 +467,87 @@ bool N1655Mcu::parseTelemetryBlock(const std::string &block, TelemetrySample &sa
 void N1655Mcu::pollWorker()
 {
     char readBuf[256];
+    std::string streamBuffer;
+
+    struct TelemetryAccumulator {
+        int count = 0;
+        int64_t windowStartTime = 0;
+        bool lastPowerState = false;
+        bool hasLastPowerState = false;
+        double tempSum = 0.0;
+        double maxTemp = 0.0;
+        int fanRpmSum = 0;
+        std::map<std::string, double> voltageSums;
+        std::map<std::string, double> minVoltages;
+        bool faultDetected = false;
+
+        void reset(int64_t nowMs, bool powerOn) {
+            count = 0;
+            windowStartTime = nowMs;
+            lastPowerState = powerOn;
+            hasLastPowerState = true;
+            tempSum = 0.0;
+            maxTemp = 0.0;
+            fanRpmSum = 0;
+            voltageSums.clear();
+            minVoltages.clear();
+            faultDetected = false;
+        }
+
+        void addSample(const TelemetrySample &sample, int64_t nowMs) {
+            if (count == 0) {
+                windowStartTime = nowMs;
+                lastPowerState = sample.powerOn;
+                hasLastPowerState = true;
+                maxTemp = sample.temperatureC;
+            } else {
+                maxTemp = std::max(maxTemp, sample.temperatureC);
+            }
+
+            count++;
+            tempSum += sample.temperatureC;
+            fanRpmSum += sample.fanRpm;
+
+            for (const auto &kv : sample.voltages) {
+                voltageSums[kv.first] += kv.second;
+                auto itMin = minVoltages.find(kv.first);
+                if (itMin == minVoltages.end()) {
+                    minVoltages[kv.first] = kv.second;
+                } else {
+                    itMin->second = std::min(itMin->second, kv.second);
+                }
+            }
+
+            auto it5v = sample.voltages.find("SYS_5V");
+            if (it5v != sample.voltages.end() && it5v->second < 4.5 && sample.powerOn) {
+                faultDetected = true;
+            }
+        }
+
+        void flushToDb(const std::string &targetName) {
+            if (count == 0 || targetName.empty()) {
+                return;
+            }
+
+            double avgTemp = tempSum / count;
+            int avgFan = fanRpmSum / count;
+            std::map<std::string, double> avgVoltages;
+            for (const auto &kv : voltageSums) {
+                avgVoltages[kv.first] = kv.second / count;
+            }
+
+            UsageDatabase::getInstance().recordTelemetrySample(
+                targetName,
+                lastPowerState,
+                avgTemp,
+                avgFan,
+                avgVoltages,
+                maxTemp,
+                minVoltages,
+                faultDetected
+            );
+        }
+    } acc;
 
     while (_running) {
         bool connected = false;
@@ -415,7 +557,10 @@ void N1655Mcu::pollWorker()
                 if (_serial.open(_port, _baudRate)) {
                     _connected = true;
                     _port = _serial.getDevice();
-                    recoverPrompt(500);
+                    _consecutiveErrors = 0;
+                    _streamingActive = false;
+                    fprintf(stderr, "[embdevenv] N1655Mcu '%s' self-healed on %s\n",
+                            _targetName.c_str(), _port.c_str());
                 } else {
                     _connected = false;
                 }
@@ -426,108 +571,188 @@ void N1655Mcu::pollWorker()
         }
 
         if (!connected) {
+            if (acc.count > 0) {
+                acc.flushToDb(_targetName);
+                acc.count = 0;
+            }
             std::unique_lock<std::mutex> lock(_cmdMutex);
-            _cv.wait_for(lock, std::chrono::milliseconds(1000), [this] {
+            _cv.wait_for(lock, std::chrono::milliseconds(2000), [this] {
                 return !_running;
             });
             continue;
         }
 
-        // If polling is suppressed by an active serial console operation, sleep until resumed
-        if (isPollingPaused()) {
+        // Yield if out-of-band command is running
+        if (_cmdInProgress.load()) {
             std::unique_lock<std::mutex> lock(_cmdMutex);
-            _cv.wait_for(lock, std::chrono::milliseconds(500), [this] {
+            _cv.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                return !_running || !_cmdInProgress.load();
+            });
+            continue;
+        }
+
+        // If polling paused (e.g. flashing), stop streaming and wait
+        if (isPollingPaused()) {
+            if (_streamingActive.load()) {
+                std::lock_guard<std::mutex> lock(_cmdMutex);
+                if (_serial.isOpen()) {
+                    const char ctrlC = '\003';
+                    ssize_t w0 = _serial.write(&ctrlC, 1);
+                    (void)w0;
+                    ssize_t w1 = _serial.write("\r", 1);
+                    (void)w1;
+                }
+                _streamingActive = false;
+            }
+            if (acc.count > 0) {
+                acc.flushToDb(_targetName);
+                acc.count = 0;
+            }
+            std::unique_lock<std::mutex> lock(_cmdMutex);
+            _cv.wait_for(lock, std::chrono::milliseconds(200), [this] {
                 return !_running || !isPollingPaused();
             });
             continue;
         }
 
-        // If Telnet client is connected, handle interactive streaming
+        // If Telnet client is connected, handle interactive console pass-through
         if (_activeClients.load() > 0) {
+            if (acc.count > 0) {
+                acc.flushToDb(_targetName);
+                acc.count = 0;
+            }
+            if (_cmdInProgress.load()) {
+                std::unique_lock<std::mutex> lock(_cmdMutex);
+                _cv.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                    return !_running || !_cmdInProgress.load();
+                });
+                continue;
+            }
             ssize_t n = 0;
-            {
-                std::lock_guard<std::mutex> lock(_cmdMutex);
-                if (_serial.isOpen()) {
-                    n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
-                }
+            if (_serial.isOpen()) {
+                n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
             }
             if (n > 0) {
+                _consecutiveErrors = 0;
                 readBuf[n] = '\0';
                 broadcastOutput(readBuf, static_cast<size_t>(n));
+            } else if (n == 0) {
+                // Silent: leave FD open
             } else if (n < 0) {
-                std::lock_guard<std::mutex> lock(_cmdMutex);
-                _connected = false;
-                _serial.close();
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                if (++_consecutiveErrors >= 3) {
+                    std::lock_guard<std::mutex> lock(_cmdMutex);
+                    _connected = false;
+                    _streamingActive = false;
+                    _serial.close();
+                    _consecutiveErrors = 0;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                } else {
+                    _serial.flush();
+                }
             }
             continue;
         }
 
-        // Sampling telemetry via bs
-        {
+        // Passive streaming telemetry via bs\r
+        if (!_streamingActive.load()) {
             std::lock_guard<std::mutex> lock(_cmdMutex);
-            if (_serial.isOpen()) {
-                ssize_t w = _serial.write("bs\r");
-                if (w < 0) {
-                    _connected = false;
-                    _serial.close();
-                } else {
-                    std::string block;
-                    bool readErr = false;
-                    auto start = std::chrono::steady_clock::now();
-                    while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - start).count() < 1200) {
-                        ssize_t n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
-                        if (n > 0) {
-                            readBuf[n] = '\0';
-                            block += readBuf;
-                            if (block.find("RPM") != std::string::npos) {
-                                break;
-                            }
-                        } else if (n < 0) {
-                            readErr = true;
-                            _connected = false;
-                            _serial.close();
-                            break;
-                        }
-                    }
-
-                    // Restore prompt with Ctrl-C to exit bs monitor mode
-                    const char ctrlC = '\003';
-                    _serial.write(&ctrlC, 1);
-                    _serial.write("\r", 1);
-                    auto drainStart = std::chrono::steady_clock::now();
-                    while (std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now() - drainStart).count() < 150) {
-                        ssize_t dn = _serial.read(readBuf, sizeof(readBuf) - 1, 30);
-                        if (dn <= 0) break;
-                    }
-
-                    if (!readErr && _serial.isOpen() && !block.empty()) {
-                        TelemetrySample sample;
-                        if (parseTelemetryBlock(block, sample)) {
-                            _telemetryStore->addSample(sample);
-                            if (!_targetName.empty()) {
-                                UsageDatabase::getInstance().recordTelemetrySample(
-                                    _targetName, sample.powerOn, sample.temperatureC, sample.fanRpm, sample.voltages);
-                            }
-                        }
-                    }
-                }
+            if (_serial.isOpen() && !_cmdInProgress.load()) {
+                ssize_t wb = _serial.write("bs\r");
+                (void)wb;
+                _streamingActive = true;
+                streamBuffer.clear();
             }
         }
 
-        // Apply adaptive backoff when target power is off (e.g. 30s instead of active 15s)
-        int currentIntervalMs = _pollIntervalMs;
-        TelemetrySample latestSample;
-        if (_telemetryStore->getLatest(latestSample) && !latestSample.powerOn) {
-            currentIntervalMs = std::max(_pollIntervalMs, 30000);
+        if (_cmdInProgress.load()) {
+            continue;
         }
 
-        std::unique_lock<std::mutex> lock(_cmdMutex);
-        _cv.wait_for(lock, std::chrono::milliseconds(currentIntervalMs), [this] {
-            return !_running || isPollingPaused() || _activeClients.load() > 0;
-        });
+        ssize_t n = 0;
+        if (_serial.isOpen()) {
+            n = _serial.read(readBuf, sizeof(readBuf) - 1, 100);
+        }
+
+        if (n > 0) {
+            _consecutiveErrors = 0;
+            readBuf[n] = '\0';
+            streamBuffer += readBuf;
+
+            size_t delimPos = streamBuffer.find("RPM");
+            if (delimPos == std::string::npos && streamBuffer.size() > 4) {
+                size_t esc2 = streamBuffer.find("\x1b[2J", 4);
+                if (esc2 != std::string::npos) {
+                    delimPos = esc2;
+                }
+            }
+
+            if (delimPos != std::string::npos) {
+                size_t endLine = streamBuffer.find('\n', delimPos);
+                std::string block;
+                if (endLine != std::string::npos) {
+                    block = streamBuffer.substr(0, endLine + 1);
+                    streamBuffer.erase(0, endLine + 1);
+                } else {
+                    block = streamBuffer;
+                    streamBuffer.clear();
+                }
+
+                TelemetrySample sample;
+                if (parseTelemetryBlock(block, sample)) {
+                    _telemetryStore->addSample(sample);
+
+                    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+
+                    bool powerTransition = (acc.hasLastPowerState && sample.powerOn != acc.lastPowerState);
+                    bool brownout = false;
+                    auto it5v = sample.voltages.find("SYS_5V");
+                    if (it5v != sample.voltages.end() && it5v->second < 4.5 && acc.hasLastPowerState && acc.lastPowerState) {
+                        brownout = true;
+                    }
+
+                    if (powerTransition && acc.count > 0) {
+                        acc.flushToDb(_targetName);
+                        acc.reset(nowMs, sample.powerOn);
+                    }
+
+                    acc.addSample(sample, nowMs);
+
+                    if (brownout || (nowMs - acc.windowStartTime >= 5000)) {
+                        acc.flushToDb(_targetName);
+                        acc.reset(nowMs, sample.powerOn);
+                    }
+                }
+            } else if (streamBuffer.size() > 4096) {
+                streamBuffer.clear();
+            }
+        } else if (n == 0) {
+            int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (acc.count > 0 && (nowMs - acc.windowStartTime >= 5000)) {
+                acc.flushToDb(_targetName);
+                acc.reset(nowMs, acc.lastPowerState);
+            }
+        } else if (n < 0) {
+            std::lock_guard<std::mutex> lock(_cmdMutex);
+            if (++_consecutiveErrors >= 3) {
+                _connected = false;
+                _streamingActive = false;
+                _serial.close();
+                _consecutiveErrors = 0;
+                if (acc.count > 0) {
+                    acc.flushToDb(_targetName);
+                    acc.count = 0;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            } else {
+                _serial.flush();
+            }
+        }
+    }
+
+    if (acc.count > 0) {
+        acc.flushToDb(_targetName);
     }
 }
 
@@ -546,15 +771,23 @@ nlohmann::json N1655Mcu::getStatusJson() const
     j["pollIntervalMs"] = _pollIntervalMs;
     j["telnetPort"] = _telnetPort;
 
+    PowerState ps = getPowerState();
+    std::string psStr = "unknown";
+    if (ps == PowerState::ON) {
+        psStr = "on";
+    } else if (ps == PowerState::OFF) {
+        psStr = "off";
+    }
+    j["powerState"] = psStr;
+    j["powerOn"] = (ps == PowerState::ON);
+
     TelemetrySample latest;
     bool hasSample = _telemetryStore->getLatest(latest);
     if (_connected.load() && hasSample) {
-        j["powerOn"] = latest.powerOn;
         j["temperatureC"] = latest.temperatureC;
         j["fanRpm"] = latest.fanRpm;
         j["latestSample"] = latest.toJson();
     } else {
-        j["powerOn"] = false;
         if (hasSample) {
             j["latestSample"] = latest.toJson();
         } else {

@@ -8,12 +8,18 @@ SHELL := /bin/bash
 BUILD_DIR := build
 NUM_PROCS := $(shell nproc 2>/dev/null || echo 4)
 
-.PHONY: all clean distclean submodules
+.PHONY: all clean distclean submodules test
 
 all: submodules
 	@mkdir -p $(BUILD_DIR)
 	@cd $(BUILD_DIR) && (test -f Makefile || cmake .. -DCMAKE_BUILD_TYPE=Release)
 	@$(MAKE) -C $(BUILD_DIR) -j$(NUM_PROCS)
+
+test: all
+	@./build/test_xymodem
+	@./build/test_terminal_sanitizer
+	@./build/test_mcu_polling
+	@if [ -f ./build/test_serial_isolation ]; then ./build/test_serial_isolation; fi
 
 submodules:
 	@if [ -f .gitmodules ]; then \
