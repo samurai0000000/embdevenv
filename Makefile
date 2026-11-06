@@ -20,6 +20,7 @@ test: all
 	@./build/test_terminal_sanitizer
 	@./build/test_mcu_polling
 	@if [ -f ./build/test_serial_isolation ]; then ./build/test_serial_isolation; fi
+	@./build/test_mcp_streamable_http
 
 submodules:
 	@if [ -f .gitmodules ]; then \

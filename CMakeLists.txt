@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embdevenv VERSION 0.1.10 LANGUAGES CXX)
+project(embdevenv VERSION 0.1.11 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -187,5 +187,47 @@ endif()
 if(SQLITE3_LIBRARY_DIRS)
     target_link_directories(test_serial_isolation PRIVATE ${SQLITE3_LIBRARY_DIRS})
 endif()
+
+add_executable(test_mcp_streamable_http
+    test/TestMcpStreamableHttp.cxx
+    src/WebServer.cxx
+    src/ToolDispatcher.cxx
+    src/StandaloneMcpServer.cxx
+    src/TargetManager.cxx
+    src/TargetFactory.cxx
+    src/Target.cxx
+    src/N1655Target.cxx
+    src/N1655Mcu.cxx
+    src/Console.cxx
+    src/SerialPort.cxx
+    src/TelemetryStore.cxx
+    src/UsageDatabase.cxx
+    src/TelnetServer.cxx
+    src/TerminalSanitizer.cxx
+    src/Config.cxx
+    src/XyModem.cxx
+    src/FlashManager.cxx
+    src/UsbMatrixEmbedded.cxx
+)
+target_include_directories(test_mcp_streamable_http PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib
+    ${CONFIGPP_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
+)
+target_link_libraries(test_mcp_streamable_http PRIVATE
+    Threads::Threads
+    ${CONFIGPP_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
+)
+if(CONFIGPP_LIBRARY_DIRS)
+    target_link_directories(test_mcp_streamable_http PRIVATE ${CONFIGPP_LIBRARY_DIRS})
+endif()
+if(SQLITE3_LIBRARY_DIRS)
+    target_link_directories(test_mcp_streamable_http PRIVATE ${SQLITE3_LIBRARY_DIRS})
+endif()
+
 
 

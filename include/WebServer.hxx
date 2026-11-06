@@ -8,11 +8,13 @@
 #define EMBDEVENV_WEB_SERVER_HXX
 
 #include <string>
+#include <vector>
 #include <memory>
 #include <thread>
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 
 namespace httplib {
 class Server;
@@ -52,6 +54,17 @@ private:
 
     mutable std::mutex _sessionMutex;
     std::map<std::string, time_t> _uiSessions;
+
+    struct McpSessionState {
+        std::string sessionId;
+        time_t lastActivity = 0;
+        std::vector<std::string> pendingMessages;
+        bool closed = false;
+    };
+
+    mutable std::mutex _mcpMutex;
+    std::condition_variable _mcpCv;
+    std::map<std::string, McpSessionState> _mcpSessions;
 };
 
 } // namespace embdevenv

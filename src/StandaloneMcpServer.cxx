@@ -45,10 +45,6 @@ bool StandaloneMcpSession::start()
 
 void StandaloneMcpSession::stop()
 {
-    if (!_running) {
-        return;
-    }
-
     _running = false;
     if (_clientFd >= 0) {
         ::shutdown(_clientFd, SHUT_RDWR);
@@ -103,78 +99,9 @@ void StandaloneMcpSession::sendResponse(const std::string &msg)
 void StandaloneMcpSession::handleLine(const std::string &line)
 {
     try {
-        json req = json::parse(line);
-
-        // Notifications don't have id and do not expect a response
-        if (!req.contains("id")) {
-            return;
-        }
-
-        auto reqId = req["id"];
-        std::string method = req.value("method", "");
-
-        if (method == "initialize") {
-            json resp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"result", {
-                    {"protocolVersion", "2024-11-05"},
-                    {"capabilities", {
-                        {"tools", json::object()}
-                    }},
-                    {"serverInfo", {
-                        {"name", "embdevenv"},
-                        {"version", EMBDEVENV_VERSION_STRING}
-                    }}
-                }}
-            };
-            sendResponse(resp.dump());
-        } else if (method == "tools/list") {
-            json resp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"result", {
-                    {"tools", ToolDispatcher::getToolDefinitions()}
-                }}
-            };
-            sendResponse(resp.dump());
-        } else if (method == "tools/call") {
-            json params = req.value("params", json::object());
-            std::string toolName = params.value("name", "");
-            json args = params.value("arguments", json::object());
-
-            std::string resultText = ToolDispatcher::dispatchTool(toolName, args);
-
-            json resp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"result", {
-                    {"content", json::array({
-                        {
-                            {"type", "text"},
-                            {"text", resultText}
-                        }
-                    })}
-                }}
-            };
-            sendResponse(resp.dump());
-        } else if (method == "ping") {
-            json resp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"result", json::object()}
-            };
-            sendResponse(resp.dump());
-        } else {
-            json errResp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"error", {
-                    {"code", -32601},
-                    {"message", "Method not found: " + method}
-                }}
-            };
-            sendResponse(errResp.dump());
+        std::string resp = ToolDispatcher::handleJsonRpc(line, "2025-03-26");
+        if (!resp.empty()) {
+            sendResponse(resp);
         }
     } catch (const std::exception &ex) {
         fprintf(stderr, "[embdevenv] StandaloneMcpSession parse error: %s\n", ex.what());
@@ -265,6 +192,14 @@ bool StandaloneMcpServer::start()
         return false;
     }
 
+    if (_port == 0) {
+        struct sockaddr_in boundAddr;
+        socklen_t addrLen = sizeof(boundAddr);
+        if (::getsockname(_listenFd, reinterpret_cast<struct sockaddr *>(&boundAddr), &addrLen) == 0) {
+            _port = ntohs(boundAddr.sin_port);
+        }
+    }
+
     if (::listen(_listenFd, 5) < 0) {
         fprintf(stderr, "[embdevenv] StandaloneMcpServer: listen failed: %s\n", strerror(errno));
         ::close(_listenFd);
@@ -280,7 +215,7 @@ bool StandaloneMcpServer::start()
 
 void StandaloneMcpServer::stop()
 {
-    if (!_running) {
+    if (!_running && _listenFd < 0 && !_acceptThread.joinable()) {
         return;
     }
 
@@ -316,6 +251,11 @@ int StandaloneMcpServer::getPort() const
 void StandaloneMcpServer::pruneSessions()
 {
     std::lock_guard<std::mutex> lock(_sessionsMutex);
+    for (auto &s : _sessions) {
+        if (!s->isRunning()) {
+            s->stop();
+        }
+    }
     _sessions.erase(
         std::remove_if(_sessions.begin(), _sessions.end(),
                        [](const std::shared_ptr<StandaloneMcpSession> &s) {

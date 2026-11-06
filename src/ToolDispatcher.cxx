@@ -10,6 +10,7 @@
 #include "FlashManager.hxx"
 #include "UsageDatabase.hxx"
 #include "TerminalSanitizer.hxx"
+#include "Version.hxx"
 #include <sstream>
 #include <thread>
 #include <chrono>
@@ -917,6 +918,183 @@ std::string ToolDispatcher::toolFlashGetStatus(const std::string &target)
     json status = FlashManager::getInstance().getLastResult(target).toJson();
     status["is_flashing"] = FlashManager::getInstance().isFlashing();
     return status.dump();
+}
+
+static json handleSingleJsonRpc(const json &req, const std::string &defaultProtocolVersion)
+{
+    if (!req.is_object()) {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", nullptr},
+            {"error", {
+                {"code", -32600},
+                {"message", "Invalid Request"}
+            }}
+        };
+    }
+
+    std::string method = req.value("method", "");
+    bool isNotification = false;
+    if (!req.contains("id")) {
+        isNotification = true;
+    } else if (req["id"].is_null() && method.rfind("notifications/", 0) == 0) {
+        isNotification = true;
+    } else if (method.rfind("notifications/", 0) == 0) {
+        isNotification = true;
+    }
+
+    if (isNotification) {
+        return json();
+    }
+
+    auto reqId = req["id"];
+
+    if (method == "initialize") {
+        std::string clientVersion;
+        if (req.contains("params") && req["params"].is_object()) {
+            clientVersion = req["params"].value("protocolVersion", "");
+        }
+        std::string chosenVersion = defaultProtocolVersion;
+        if (clientVersion == "2024-11-05" || clientVersion == "2025-03-26" || clientVersion == "2025-11-25") {
+            chosenVersion = clientVersion;
+        }
+
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", {
+                {"protocolVersion", chosenVersion},
+                {"capabilities", {
+                    {"tools", json::object()},
+                    {"resources", json::object()},
+                    {"prompts", json::object()}
+                }},
+                {"serverInfo", {
+                    {"name", "embdevenv"},
+                    {"version", EMBDEVENV_VERSION_STRING}
+                }}
+            }}
+        };
+    } else if (method == "ping") {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", json::object()}
+        };
+    } else if (method == "tools/list") {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", {
+                {"tools", ToolDispatcher::getToolDefinitions()}
+            }}
+        };
+    } else if (method == "resources/list") {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", {
+                {"resources", json::array()}
+            }}
+        };
+    } else if (method == "prompts/list") {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", {
+                {"prompts", json::array()}
+            }}
+        };
+    } else if (method == "tools/call") {
+        json params = req.value("params", json::object());
+        std::string toolName = params.value("name", "");
+        json args = params.value("arguments", json::object());
+
+        std::string resultText = ToolDispatcher::dispatchTool(toolName, args);
+
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"result", {
+                {"content", json::array({
+                    {
+                        {"type", "text"},
+                        {"text", resultText}
+                    }
+                })}
+            }}
+        };
+    } else {
+        return json{
+            {"jsonrpc", "2.0"},
+            {"id", reqId},
+            {"error", {
+                {"code", -32601},
+                {"message", "Method not found: " + method}
+            }}
+        };
+    }
+}
+
+std::string ToolDispatcher::handleJsonRpc(const std::string &rawBody, const std::string &defaultProtocolVersion)
+{
+    json parsed;
+    try {
+        parsed = json::parse(rawBody);
+    } catch (...) {
+        json parseErr = {
+            {"jsonrpc", "2.0"},
+            {"id", nullptr},
+            {"error", {
+                {"code", -32700},
+                {"message", "Parse error"}
+            }}
+        };
+        return parseErr.dump();
+    }
+
+    if (parsed.is_array()) {
+        if (parsed.empty()) {
+            json invReq = {
+                {"jsonrpc", "2.0"},
+                {"id", nullptr},
+                {"error", {
+                    {"code", -32600},
+                    {"message", "Invalid Request"}
+                }}
+            };
+            return invReq.dump();
+        }
+
+        json respArray = json::array();
+        for (const auto &item : parsed) {
+            json itemResp = handleSingleJsonRpc(item, defaultProtocolVersion);
+            if (!itemResp.is_null()) {
+                respArray.push_back(itemResp);
+            }
+        }
+
+        if (respArray.empty()) {
+            return "";
+        }
+        return respArray.dump();
+    } else if (parsed.is_object()) {
+        json singleResp = handleSingleJsonRpc(parsed, defaultProtocolVersion);
+        if (singleResp.is_null()) {
+            return "";
+        }
+        return singleResp.dump();
+    } else {
+        json invReq = {
+            {"jsonrpc", "2.0"},
+            {"id", nullptr},
+            {"error", {
+                {"code", -32600},
+                {"message", "Invalid Request"}
+            }}
+        };
+        return invReq.dump();
+    }
 }
 
 } // namespace embdevenv

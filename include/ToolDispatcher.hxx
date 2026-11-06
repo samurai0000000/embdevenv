@@ -16,6 +16,8 @@ class ToolDispatcher {
 public:
     static nlohmann::json getToolDefinitions();
     static std::string dispatchTool(const std::string &name, const nlohmann::json &args);
+    static std::string handleJsonRpc(const std::string &rawBody,
+                                     const std::string &defaultProtocolVersion = "2025-03-26");
 
 private:
     static std::string toolListTargets();

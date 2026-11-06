@@ -11,6 +11,8 @@
 #include "TerminalSanitizer.hxx"
 #include "Config.hxx"
 #include "XyModem.hxx"
+#include "ToolDispatcher.hxx"
+#include "Version.hxx"
 #include <sys/stat.h>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -23,6 +25,19 @@
 #include <ctime>
 
 namespace embdevenv {
+
+static std::string generateMcpSessionId()
+{
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937_64 gen(rd());
+    static thread_local std::uniform_int_distribution<uint64_t> dis;
+
+    uint64_t p1 = dis(gen);
+    uint64_t p2 = dis(gen);
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0') << std::setw(16) << p1 << std::setw(16) << p2;
+    return oss.str();
+}
 
 WebServer::WebServer(int port, const std::string &bindAddress, bool endpointsEnabled)
     : _port(port)
@@ -56,6 +71,24 @@ bool WebServer::start()
     _server = std::make_unique<httplib::Server>();
     setupRoutes();
 
+    if (_port == 0) {
+        int boundPort = _server->bind_to_any_port(_bindAddress.c_str());
+        if (boundPort <= 0) {
+            fprintf(stderr, "[embdevenv] WebServer error: failed to bind to any port on %s\n",
+                    _bindAddress.c_str());
+            _server.reset();
+            return false;
+        }
+        _port = boundPort;
+    } else {
+        if (!_server->bind_to_port(_bindAddress.c_str(), _port)) {
+            fprintf(stderr, "[embdevenv] WebServer error: failed to bind to %s:%d\n",
+                    _bindAddress.c_str(), _port);
+            _server.reset();
+            return false;
+        }
+    }
+
     _running = true;
     _serverThread = std::thread(&WebServer::serverWorker, this);
 
@@ -73,6 +106,14 @@ void WebServer::stop()
     }
 
     _running = false;
+
+    {
+        std::lock_guard<std::mutex> lock(_mcpMutex);
+        for (auto &kv : _mcpSessions) {
+            kv.second.closed = true;
+        }
+    }
+    _mcpCv.notify_all();
 
     if (_server != nullptr) {
         _server->stop();
@@ -104,7 +145,7 @@ const std::string &WebServer::getBindAddress() const
 void WebServer::serverWorker()
 {
     if (_server != nullptr) {
-        if (!_server->listen(_bindAddress.c_str(), _port)) {
+        if (!_server->listen_after_bind()) {
             fprintf(stderr, "[embdevenv] WebServer error: failed to listen on %s:%d\n",
                     _bindAddress.c_str(), _port);
         }
@@ -291,6 +332,232 @@ void WebServer::setupRoutes()
         std::string token = createUiSession();
         res.set_header("Set-Cookie", "embdevenv_session=" + token + "; Path=/; SameSite=Strict");
         res.set_content(getDashboardHtml(token), "text/html");
+    });
+
+    auto setCorsHeaders = [](httplib::Response &res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers",
+                       "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID");
+        res.set_header("Access-Control-Expose-Headers", "Mcp-Session-Id");
+    };
+
+    auto handleOptions = [setCorsHeaders](const httplib::Request &, httplib::Response &res) {
+        setCorsHeaders(res);
+        res.status = 204;
+    };
+    _server->Options("/mcp", handleOptions);
+    _server->Options("/sse", handleOptions);
+    _server->Options("/message", handleOptions);
+
+    auto handleStreamableHttpPost = [this, setCorsHeaders](const httplib::Request &req, httplib::Response &res) {
+        setCorsHeaders(res);
+
+        std::string sessionId;
+        if (req.has_header("Mcp-Session-Id")) {
+            sessionId = req.get_header_value("Mcp-Session-Id");
+        }
+
+        bool isInit = false;
+        try {
+            auto j = nlohmann::json::parse(req.body);
+            if (j.is_object() && j.value("method", "") == "initialize") {
+                isInit = true;
+            }
+        } catch (...) {}
+
+        time_t now = time(nullptr);
+        if (sessionId.empty() && isInit) {
+            sessionId = generateMcpSessionId();
+        }
+
+        if (!sessionId.empty()) {
+            std::lock_guard<std::mutex> lock(_mcpMutex);
+            auto it = _mcpSessions.find(sessionId);
+            if (it != _mcpSessions.end()) {
+                it->second.lastActivity = now;
+            } else {
+                McpSessionState state;
+                state.sessionId = sessionId;
+                state.lastActivity = now;
+                state.closed = false;
+                _mcpSessions[sessionId] = std::move(state);
+            }
+            res.set_header("Mcp-Session-Id", sessionId);
+        }
+
+        std::string resp = ToolDispatcher::handleJsonRpc(req.body, "2025-03-26");
+        if (resp.find("\"code\":-32700") != std::string::npos || resp.find("\"code\": -32700") != std::string::npos) {
+            res.status = 400;
+            res.set_content(resp, "application/json");
+            return;
+        }
+
+        if (resp.empty()) {
+            res.status = 202;
+            res.body.clear();
+        } else {
+            res.status = 200;
+            res.set_content(resp, "application/json");
+        }
+    };
+
+    _server->Post("/mcp", handleStreamableHttpPost);
+    _server->Post("/sse", handleStreamableHttpPost);
+
+    _server->Post("/message", [setCorsHeaders](const httplib::Request &req, httplib::Response &res) {
+        setCorsHeaders(res);
+        std::string resp = ToolDispatcher::handleJsonRpc(req.body, "2024-11-05");
+        if (resp.find("\"code\":-32700") != std::string::npos || resp.find("\"code\": -32700") != std::string::npos) {
+            res.status = 400;
+            res.set_content(resp, "application/json");
+            return;
+        }
+        if (resp.empty()) {
+            res.status = 202;
+            res.body.clear();
+        } else {
+            res.status = 200;
+            res.set_content(resp, "application/json");
+        }
+    });
+
+    _server->Get("/sse", [setCorsHeaders](const httplib::Request &, httplib::Response &res) {
+        setCorsHeaders(res);
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        res.set_content("event: endpoint\ndata: /message\n\n", "text/event-stream");
+    });
+
+    _server->Get("/mcp", [this, setCorsHeaders](const httplib::Request &req, httplib::Response &res) {
+        setCorsHeaders(res);
+
+        if (req.has_header("Accept")) {
+            std::string accept = req.get_header_value("Accept");
+            if (accept.find("text/event-stream") == std::string::npos &&
+                accept.find("*/*") == std::string::npos) {
+                res.status = 405;
+                return;
+            }
+        }
+
+        std::string sessionId;
+        if (req.has_header("Mcp-Session-Id")) {
+            sessionId = req.get_header_value("Mcp-Session-Id");
+        }
+
+        time_t now = time(nullptr);
+        if (sessionId.empty()) {
+            sessionId = generateMcpSessionId();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(_mcpMutex);
+            auto it = _mcpSessions.find(sessionId);
+            if (it != _mcpSessions.end()) {
+                it->second.lastActivity = now;
+            } else {
+                McpSessionState state;
+                state.sessionId = sessionId;
+                state.lastActivity = now;
+                state.closed = false;
+                _mcpSessions[sessionId] = std::move(state);
+            }
+        }
+
+        res.set_header("Mcp-Session-Id", sessionId);
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("X-Accel-Buffering", "no");
+
+        auto lastKeepalive = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+        auto initialSent = std::make_shared<bool>(false);
+
+        auto provider = [this, sessionId, lastKeepalive, initialSent](size_t offset, httplib::DataSink &sink) -> bool {
+            (void) offset;
+            if (!sink.is_writable() || !_running) {
+                return false;
+            }
+
+            if (!*initialSent) {
+                *initialSent = true;
+                std::string connMsg = ": connected\n\n";
+                return sink.write(connMsg.data(), connMsg.size());
+            }
+
+            std::vector<std::string> toSend;
+            {
+                std::unique_lock<std::mutex> lock(_mcpMutex);
+                _mcpCv.wait_for(lock, std::chrono::milliseconds(200), [this, &sessionId]() {
+                    if (!_running) return true;
+                    auto it = _mcpSessions.find(sessionId);
+                    if (it == _mcpSessions.end() || it->second.closed) return true;
+                    return !it->second.pendingMessages.empty();
+                });
+
+                if (!_running) {
+                    return false;
+                }
+
+                auto it = _mcpSessions.find(sessionId);
+                if (it == _mcpSessions.end() || it->second.closed) {
+                    return false;
+                }
+
+                it->second.lastActivity = time(nullptr);
+
+                if (!it->second.pendingMessages.empty()) {
+                    toSend = std::move(it->second.pendingMessages);
+                    it->second.pendingMessages.clear();
+                }
+            }
+
+            if (!toSend.empty()) {
+                std::string batch;
+                for (const auto &msg : toSend) {
+                    batch += "event: message\ndata: " + msg + "\n\n";
+                }
+                *lastKeepalive = std::chrono::steady_clock::now();
+                return sink.write(batch.data(), batch.size());
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - *lastKeepalive).count() >= 15) {
+                *lastKeepalive = now;
+                std::string ping = ": keepalive\n\n";
+                return sink.write(ping.data(), ping.size());
+            }
+
+            return true;
+        };
+
+        auto releaser = [this, sessionId](bool success) {
+            (void) success;
+            std::lock_guard<std::mutex> lock(_mcpMutex);
+            auto it = _mcpSessions.find(sessionId);
+            if (it != _mcpSessions.end()) {
+                it->second.lastActivity = time(nullptr);
+            }
+        };
+
+        res.set_chunked_content_provider("text/event-stream", provider, releaser);
+    });
+
+    _server->Delete("/mcp", [this, setCorsHeaders](const httplib::Request &req, httplib::Response &res) {
+        setCorsHeaders(res);
+        if (req.has_header("Mcp-Session-Id")) {
+            std::string sessionId = req.get_header_value("Mcp-Session-Id");
+            {
+                std::lock_guard<std::mutex> lock(_mcpMutex);
+                auto it = _mcpSessions.find(sessionId);
+                if (it != _mcpSessions.end()) {
+                    it->second.closed = true;
+                    _mcpSessions.erase(it);
+                }
+            }
+            _mcpCv.notify_all();
+        }
+        res.status = 204;
     });
 
     // Overall status
