@@ -43,7 +43,8 @@ private:
                                          int timeoutSec,
                                          int charDelayMs,
                                          const std::string &logFilePath,
-                                         const std::string &consoleName = "");
+                                         const std::string &consoleName = "",
+                                         int timeoutMs = 0);
     static std::string toolConsoleLog(const std::string &target,
                                       const std::string &action,
                                       const std::string &filePath = "",

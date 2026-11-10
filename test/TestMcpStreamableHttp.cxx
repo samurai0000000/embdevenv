@@ -6,6 +6,10 @@
 
 #include "WebServer.hxx"
 #include "StandaloneMcpServer.hxx"
+#include "AimonGatewayClient.hxx"
+#include "TargetManager.hxx"
+#include "Target.hxx"
+#include "Console.hxx"
 #include "ToolDispatcher.hxx"
 #include "Version.hxx"
 #include <httplib.h>
@@ -364,6 +368,136 @@ static void testStandaloneMcpServer()
     mcpServer.stop();
 }
 
+static void testAimonGatewayConcurrentAndTimeoutMs()
+{
+    std::cout << "[TEST] testAimonGatewayConcurrentAndTimeoutMs..." << std::endl;
+
+    // 1. Verify schema exposes timeout_ms on embdevenv_console_expect
+    json tools = ToolDispatcher::getToolDefinitions();
+    bool foundExpectTimeoutMs = false;
+    for (const auto &t : tools) {
+        if (t.value("name", "") == "embdevenv_console_expect") {
+            const auto &props = t["inputSchema"]["properties"];
+            if (props.contains("timeout_ms")) {
+                foundExpectTimeoutMs = true;
+            }
+        }
+    }
+    TEST_ASSERT(foundExpectTimeoutMs, "embdevenv_console_expect schema includes timeout_ms");
+
+    // 2. Register a synthetic target with an unbacked console so expect waits for timeout_ms
+    auto target = std::make_shared<Target>("mock-devkit", "n1-655-devkit", "Mock Devkit", true, 0);
+    auto console2 = std::make_shared<Console>("console2", "/dev/null", 115200, 100, 0);
+    target->addConsole(console2);
+    TargetManager::getInstance().addTarget(target);
+
+    // 3. Spin up a local mock aimon TCP gateway listener on an ephemeral port
+    int listenFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT(listenFd >= 0, "mock gateway listen socket created");
+    int opt = 1;
+    setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    TEST_ASSERT(::bind(listenFd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) == 0,
+                "mock gateway bind succeeded");
+
+    socklen_t addrLen = sizeof(addr);
+    TEST_ASSERT(::getsockname(listenFd, reinterpret_cast<struct sockaddr *>(&addr), &addrLen) == 0,
+                "getsockname succeeded");
+    int gwPort = ntohs(addr.sin_port);
+    TEST_ASSERT(::listen(listenFd, 1) == 0, "mock gateway listen succeeded");
+
+    auto &gwClient = AimonGatewayClient::getInstance();
+    gwClient.start("127.0.0.1", gwPort);
+
+    struct pollfd acceptPfd{listenFd, POLLIN, 0};
+    TEST_ASSERT(poll(&acceptPfd, 1, 3000) > 0, "AimonGatewayClient connected to mock gateway");
+    int connFd = ::accept(listenFd, nullptr, nullptr);
+    TEST_ASSERT(connFd >= 0, "accept() succeeded");
+
+    std::string recvBuf;
+    auto readJsonLine = [&](int timeoutMs) -> json {
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start).count() < timeoutMs) {
+            size_t nl = recvBuf.find('\n');
+            if (nl != std::string::npos) {
+                std::string line = recvBuf.substr(0, nl);
+                recvBuf.erase(0, nl + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) return json::parse(line);
+            }
+            struct pollfd pfd{connFd, POLLIN, 0};
+            if (poll(&pfd, 1, 20) > 0 && (pfd.revents & POLLIN)) {
+                char buf[1024];
+                ssize_t n = ::recv(connFd, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                recvBuf.append(buf, static_cast<size_t>(n));
+            }
+        }
+        return json();
+    };
+
+    auto regJson = readJsonLine(2000);
+    TEST_ASSERT(!regJson.is_null() && regJson.value("method", "") == "gateway/register",
+                "Received gateway/register from AimonGatewayClient");
+
+    // Issue a 500ms blocking embdevenv_console_expect (using timeout_ms) on console2,
+    // and immediately issue a fast embdevenv_list_targets call behind it on the same socket.
+    auto t0 = std::chrono::steady_clock::now();
+    json expectReq = {
+        {"jsonrpc", "2.0"},
+        {"id", "req-expect"},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "embdevenv_console_expect"},
+            {"arguments", {
+                {"target", "mock-devkit"},
+                {"console", "console2"},
+                {"wait_for", json::array({"r52-cli>"})},
+                {"timeout_ms", 500}
+            }}
+        }}
+    };
+    json listReq = {
+        {"jsonrpc", "2.0"},
+        {"id", "req-list"},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "embdevenv_list_targets"},
+            {"arguments", json::object()}
+        }}
+    };
+    std::string wire = expectReq.dump() + "\n" + listReq.dump() + "\n";
+    ::send(connFd, wire.data(), wire.size(), 0);
+
+    // First response must be req-list (completing while req-expect is still waiting!)
+    json firstResp = readJsonLine(1500);
+    auto tFirstMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    TEST_ASSERT(!firstResp.is_null() && firstResp.value("id", "") == "req-list",
+                "Fast tools/call completed out-of-order without head-of-line blocking");
+    TEST_ASSERT(tFirstMs < 350, "Fast tools/call completed before 500ms expect finished");
+
+    // Second response must be req-expect honoring timeout_ms = 500 (not 60s!)
+    json secondResp = readJsonLine(2000);
+    auto tSecondMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    TEST_ASSERT(!secondResp.is_null() && secondResp.value("id", "") == "req-expect",
+                "Received expect response after timeout_ms");
+    TEST_ASSERT(tSecondMs >= 450 && tSecondMs < 1500,
+                "embdevenv_console_expect honored timeout_ms=500 instead of 60s default");
+
+    gwClient.stop();
+    gwClient.join();
+    ::close(connFd);
+    ::close(listenFd);
+}
+
 int main()
 {
     std::cout << "========================================" << std::endl;
@@ -372,6 +506,7 @@ int main()
 
     testWebServerStreamableHttp();
     testStandaloneMcpServer();
+    testAimonGatewayConcurrentAndTimeoutMs();
 
     std::cout << "----------------------------------------" << std::endl;
     std::cout << " Tests Passed: " << g_testsPassed << std::endl;

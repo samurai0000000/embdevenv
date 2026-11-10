@@ -10,11 +10,14 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <poll.h>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
+#include <algorithm>
 
 namespace embdevenv {
 
@@ -79,6 +82,36 @@ void AimonGatewayClient::join()
     if (_thread.joinable()) {
         _thread.join();
     }
+    joinAllWorkers();
+}
+
+void AimonGatewayClient::pruneWorkersLocked()
+{
+    for (auto &w : _workers) {
+        if (w && w->done.load() && w->thread.joinable()) {
+            w->thread.join();
+        }
+    }
+    _workers.erase(
+        std::remove_if(_workers.begin(), _workers.end(),
+                       [](const std::shared_ptr<WorkerTask> &w) {
+                           return !w || (w->done.load() && !w->thread.joinable());
+                       }),
+        _workers.end());
+}
+
+void AimonGatewayClient::joinAllWorkers()
+{
+    std::vector<std::shared_ptr<WorkerTask>> toJoin;
+    {
+        std::lock_guard<std::mutex> lock(_workersMutex);
+        toJoin.swap(_workers);
+    }
+    for (auto &w : toJoin) {
+        if (w && w->thread.joinable()) {
+            w->thread.join();
+        }
+    }
 }
 
 bool AimonGatewayClient::isConnected() const
@@ -122,6 +155,19 @@ bool AimonGatewayClient::connectToGateway()
 
         int flag = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char *>(&flag), sizeof(flag));
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char *>(&flag), sizeof(flag));
+#ifdef TCP_KEEPIDLE
+        int keepIdle = 15;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, reinterpret_cast<char *>(&keepIdle), sizeof(keepIdle));
+#endif
+#ifdef TCP_KEEPINTVL
+        int keepIntvl = 5;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, reinterpret_cast<char *>(&keepIntvl), sizeof(keepIntvl));
+#endif
+#ifdef TCP_KEEPCNT
+        int keepCnt = 3;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, reinterpret_cast<char *>(&keepCnt), sizeof(keepCnt));
+#endif
 
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
@@ -256,21 +302,28 @@ void AimonGatewayClient::handleRequest(const std::string &line)
             std::string toolName = params.value("name", "");
             json args = params.value("arguments", json::object());
 
-            std::string resultText = ToolDispatcher::dispatchTool(toolName, args);
+            std::lock_guard<std::mutex> lock(_workersMutex);
+            pruneWorkersLocked();
+            auto task = std::make_shared<WorkerTask>();
+            task->thread = std::thread([this, task, reqId, toolName, args]() {
+                std::string resultText = ToolDispatcher::dispatchTool(toolName, args);
 
-            json resp = {
-                {"jsonrpc", "2.0"},
-                {"id", reqId},
-                {"result", {
-                    {"content", json::array({
-                        {
-                            {"type", "text"},
-                            {"text", resultText}
-                        }
-                    })}
-                }}
-            };
-            sendResponse(resp.dump());
+                json resp = {
+                    {"jsonrpc", "2.0"},
+                    {"id", reqId},
+                    {"result", {
+                        {"content", json::array({
+                            {
+                                {"type", "text"},
+                                {"text", resultText}
+                            }
+                        })}
+                    }}
+                };
+                sendResponse(resp.dump());
+                task->done.store(true);
+            });
+            _workers.push_back(task);
         } else if (method == "tools/list") {
             json resp = {
                 {"jsonrpc", "2.0"},

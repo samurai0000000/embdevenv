@@ -75,7 +75,8 @@ public:
                         const std::vector<std::string> &patterns,
                         int timeoutSec = 60,
                         int charDelayMs = 0,
-                        const std::string &logFilePath = "");
+                        const std::string &logFilePath = "",
+                        int timeoutMs = 0);
 
     TransferFileResult transferFile(const std::string &filePath,
                                    XyModem::Protocol proto = XyModem::Protocol::YMODEM,

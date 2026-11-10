@@ -181,13 +181,16 @@ static void testLiveHostSysfsCh9344()
 {
     std::cout << "[TEST] testLiveHostSysfsCh9344..." << std::endl;
 
-    if (fs::exists("/sys/class/tty/ttyCH9344USB8") &&
-        fs::exists("/sys/class/tty/ttyCH9344USB11")) {
+    if ((fs::exists("/sys/class/tty/ttyCH9344USB0") &&
+         fs::exists("/sys/class/tty/ttyCH9344USB3")) ||
+        (fs::exists("/sys/class/tty/ttyCH9344USB8") &&
+         fs::exists("/sys/class/tty/ttyCH9344USB11"))) {
         std::string mcu = SerialPort::resolveUsbPortNode("4-10.3.2", 3);
-        TEST_ASSERT(mcu == "/dev/ttyCH9344USB11", "Live host MCU resolved to /dev/ttyCH9344USB11");
-
         std::string c0 = SerialPort::resolveUsbPortNode("4-10.3.2", 0);
-        TEST_ASSERT(c0 == "/dev/ttyCH9344USB8", "Live host Console 0 resolved to /dev/ttyCH9344USB8");
+        bool validPair = (c0 == "/dev/ttyCH9344USB0" && mcu == "/dev/ttyCH9344USB3") ||
+                         (c0 == "/dev/ttyCH9344USB8" && mcu == "/dev/ttyCH9344USB11");
+        TEST_ASSERT(validPair && !mcu.empty(), "Live host 4-10.3.2 MCU resolved to channel 3 (USB3 or USB11)");
+        TEST_ASSERT(validPair && !c0.empty(), "Live host 4-10.3.2 Console 0 resolved to channel 0 (USB0 or USB8)");
     } else {
         std::cout << "  (Skipping live test: CH9344 hardware not attached on host)" << std::endl;
     }

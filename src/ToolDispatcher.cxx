@@ -151,6 +151,7 @@ json ToolDispatcher::getToolDefinitions()
                     {"prompt", {{"type", "string"}, {"description", "Bootloader prompt to match (default: '=>')"}}},
                     {"interrupt_key", {{"type", "string"}, {"description", "Character to send repeatedly (default: ' ')"}}},
                     {"timeout_sec", {{"type", "integer"}, {"description", "Maximum seconds to wait (default: 30)"}}},
+                    {"timeout_ms", {{"type", "integer"}, {"description", "Maximum milliseconds to wait (overrides timeout_sec if specified)"}}},
                     {"reboot_first", {{"type", "boolean"}, {"description", "Reboot target via MCU before starting catch loop (default: false)"}}},
                     {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
                 }},
@@ -171,6 +172,7 @@ json ToolDispatcher::getToolDefinitions()
                     }},
                     {"command", {{"type", "string"}, {"description", "Optional command line to send before waiting"}}},
                     {"timeout_sec", {{"type", "integer"}, {"description", "Maximum seconds to wait (default: 60)"}}},
+                    {"timeout_ms", {{"type", "integer"}, {"description", "Maximum milliseconds to wait (overrides timeout_sec if specified)"}}},
                     {"char_delay_ms", {{"type", "integer"}, {"description", "Pacing delay between characters in ms (default: 10)"}}},
                     {"log_file", {{"type", "string"}, {"description", "Optional host file path to record streaming console output"}}},
                     {"console", {{"type", "string"}, {"description", "Console name (default: primary)"}}}
@@ -291,6 +293,20 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         return "Error: missing required argument 'target'";
     }
 
+    auto resolveTimeoutSec = [](const json &a, int defaultSec) -> int {
+        if (a.contains("timeout_sec") && a["timeout_sec"].is_number()) {
+            int s = a["timeout_sec"].get<int>();
+            return s > 0 ? s : defaultSec;
+        }
+        if (a.contains("timeout_ms") && a["timeout_ms"].is_number()) {
+            int ms = a["timeout_ms"].get<int>();
+            if (ms > 0) {
+                return (ms + 999) / 1000;
+            }
+        }
+        return defaultSec;
+    };
+
     if (name == "embdevenv_get_target_status") {
         return toolGetTargetStatus(target);
     } else if (name == "embdevenv_mcu_power") {
@@ -327,7 +343,7 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
     } else if (name == "embdevenv_console_catch_bootloader") {
         std::string prompt = args.value("prompt", "=>");
         std::string interruptKey = args.value("interrupt_key", " ");
-        int timeoutSec = args.value("timeout_sec", 30);
+        int timeoutSec = resolveTimeoutSec(args, 30);
         bool rebootFirst = args.value("reboot_first", false);
         std::string console = args.value("console", "");
         return toolConsoleCatchBootloader(target, prompt, interruptKey, timeoutSec, rebootFirst, console);
@@ -347,11 +363,17 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
                 }
             }
         }
-        int timeoutSec = args.value("timeout_sec", 60);
+        int timeoutSec = resolveTimeoutSec(args, 60);
+        int timeoutMs = 0;
+        if (args.contains("timeout_ms") && args["timeout_ms"].is_number()) {
+            timeoutMs = args["timeout_ms"].get<int>();
+        } else if (args.contains("timeout_sec") && args["timeout_sec"].is_number()) {
+            timeoutMs = static_cast<int>(args["timeout_sec"].get<double>() * 1000.0);
+        }
         int charDelayMs = args.value("char_delay_ms", 10);
         std::string logFile = args.value("log_file", "");
         std::string console = args.value("console", "");
-        return toolConsoleExpect(target, command, patterns, timeoutSec, charDelayMs, logFile, console);
+        return toolConsoleExpect(target, command, patterns, timeoutSec, charDelayMs, logFile, console, timeoutMs);
     } else if (name == "embdevenv_console_log") {
         std::string action = args.value("action", "");
         std::string filePath = args.value("file_path", "");
@@ -368,7 +390,7 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         std::string protocol = args.value("protocol", "loady");
         std::string address = args.value("address", "");
         bool sendCommand = args.value("send_command", true);
-        int timeoutSec = args.value("timeout_sec", 300);
+        int timeoutSec = resolveTimeoutSec(args, 300);
         std::string console = args.value("console", "");
         return toolConsoleLoad(target, filePath, protocol, address, sendCommand, timeoutSec, console);
     } else if (name == "embdevenv_get_board_stats") {
@@ -380,7 +402,7 @@ std::string ToolDispatcher::dispatchTool(const std::string &name, const json &ar
         std::string bldImage = args.value("bld_image", "");
         std::string fwImage = args.value("fw_image", "");
         bool forceUsbBoot = args.value("force_usb_boot", true);
-        int timeoutSec = args.value("timeout_sec", 60);
+        int timeoutSec = resolveTimeoutSec(args, 60);
         return toolFlashTarget(target, chip, ustImage, bldImage, fwImage, forceUsbBoot, timeoutSec);
     } else if (name == "embdevenv_flash_get_status") {
         return toolFlashGetStatus(target);
@@ -649,7 +671,8 @@ std::string ToolDispatcher::toolConsoleExpect(const std::string &targetName,
                                              int timeoutSec,
                                              int charDelayMs,
                                              const std::string &logFilePath,
-                                             const std::string &consoleName)
+                                             const std::string &consoleName,
+                                             int timeoutMs)
 {
     auto target = TargetManager::getInstance().getTarget(targetName);
     auto console = resolveTargetConsole(target, consoleName);
@@ -668,7 +691,7 @@ std::string ToolDispatcher::toolConsoleExpect(const std::string &targetName,
     }
 
     std::string resolvedLog = !logFilePath.empty() ? Config::resolveHomePath(logFilePath) : "";
-    auto res = console->expect(command, patterns, timeoutSec, charDelayMs, resolvedLog);
+    auto res = console->expect(command, patterns, timeoutSec, charDelayMs, resolvedLog, timeoutMs);
 
     json j = {
         {"target", targetName},

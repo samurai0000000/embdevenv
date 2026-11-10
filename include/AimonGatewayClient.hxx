@@ -8,6 +8,7 @@
 #define EMBDEVENV_AIMON_GATEWAY_CLIENT_HXX
 
 #include <string>
+#include <vector>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -30,6 +31,11 @@ public:
     int getWebPort() const { return _webPort; }
 
 private:
+    struct WorkerTask {
+        std::thread thread;
+        std::atomic<bool> done{false};
+    };
+
     AimonGatewayClient();
     ~AimonGatewayClient();
     AimonGatewayClient(const AimonGatewayClient &) = delete;
@@ -43,6 +49,8 @@ private:
 
     void handleRequest(const std::string &line);
     void sendResponse(const std::string &jsonResponse);
+    void pruneWorkersLocked();
+    void joinAllWorkers();
 
     std::string _host;
     int _port;
@@ -54,6 +62,8 @@ private:
 
     std::thread _thread;
     std::mutex _sendMutex;
+    std::mutex _workersMutex;
+    std::vector<std::shared_ptr<WorkerTask>> _workers;
 };
 
 } // namespace embdevenv

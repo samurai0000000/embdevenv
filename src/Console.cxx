@@ -260,7 +260,8 @@ Console::ExpectResult Console::expect(
     const std::vector<std::string> &patterns,
     int timeoutSec,
     int charDelayMs,
-    const std::string &logFilePath)
+    const std::string &logFilePath,
+    int timeoutMs)
 {
     ActivityHook hook;
     {
@@ -321,10 +322,10 @@ Console::ExpectResult Console::expect(
         writePaced(toSend, charDelayMs);
     }
 
-    int maxWaitSec = timeoutSec > 0 ? timeoutSec : 60;
+    int waitMs = (timeoutMs > 0) ? timeoutMs : ((timeoutSec > 0 ? timeoutSec : 60) * 1000);
     {
         std::unique_lock<std::mutex> lock(ctx->mtx);
-        ctx->cv.wait_for(lock, std::chrono::seconds(maxWaitSec), [&]{ return ctx->matched; });
+        ctx->cv.wait_for(lock, std::chrono::milliseconds(waitMs), [&]{ return ctx->matched; });
     }
 
     removeListener(listenerId);
